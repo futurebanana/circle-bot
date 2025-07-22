@@ -1,0 +1,41 @@
+{
+  "name": "circle-bot",
+  "version": "0.0.1",
+  "description": "A Discord bot for handling backlogs,decisions and meetings for a sociocratic community\" ",
+  "main": "index.js",
+  "scripts": {
+    "dev": "npx ts-node-dev --respawn src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "start": "NODE_ENV=production node build/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/futurebanana/circle-bot.git"
+  },
+  "keywords": [
+    "discord",
+    "sociocratic",
+    "backlog",
+    "meetings"
+  ],
+  "author": "Karsten Jakobsen",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/futurebanana/circle-bot/issues"
+  },
+  "homepage": "https://github.com/futurebanana/circle-bot#readme",
+  "dependencies": {
+    "discord.js": "^14.21.0",
+    "dotenv": "^17.2.0",
+    "openai": "^5.10.1",
+    "pino": "^9.7.0",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.15",
+    "nodemon": "^3.1.10",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.8.3"
+  }
+}

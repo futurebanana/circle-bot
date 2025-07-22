@@ -1,0 +1,22 @@
+{
+    "compilerOptions": {
+        "module": "commonjs",
+        "moduleResolution": "node",
+        "strict": true,
+        "declaration": true,
+        "target": "es5",
+        "outDir": "build",
+        "lib": ["es2015"],
+        "pretty": true,
+        "skipLibCheck": true,
+        "allowSyntheticDefaultImports": true,
+        "esModuleInterop": true
+    },
+    "include": [
+        "src/index.ts"
+    ],
+    "exclude": [
+        "node_modules/**/*.ts",
+        "**/*.spec.ts",
+    ]
+}

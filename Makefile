@@ -3,13 +3,18 @@
 VERSION ?= $(shell git rev-parse --short HEAD)
 APP_NAME ?= circle-bot
 
-docker-start:
-	docker-compose up
+login:
+	@echo "Logging in to Heroku..."
+	heroku login
 
-docker-rebuild:
-	docker-compose down && \
-	docker-compose build && \
-	docker-compose up
+deploy:
+	@echo "Deploying to Heroku..."
+	git push heroku main
 
-docker-reinitialize:
-	docker-compose down -
+scale:
+	@echo "Scaling the Heroku app..."
+	heroku ps:scale worker=1:Basic
+
+logs:
+	@echo "Fetching logs from Heroku..."
+	heroku logs --tail

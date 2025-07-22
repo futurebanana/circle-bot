@@ -147,6 +147,15 @@ const client = new Client({
 // ────────────────────────────────────────────────────────────────────────────
 const commands = [
 
+
+  new SlashCommandBuilder()
+  .setName('hjælp')
+  .setDescription('Vis en oversigt over, hvordan du bruger cirkel botten'),
+
+  new SlashCommandBuilder()
+  .setName('help')
+  .setDescription('Shows an overview of how to use the circle bot'),
+
   new SlashCommandBuilder()
     .setName('beslutninger')
     .setDescription('Spørg hasselmusen om hjælp til at lede i beslutninger')
@@ -207,9 +216,10 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction: Interaction) => {
   if (interaction.isChatInputCommand()) {
     switch (interaction.commandName) {
-      case 'hello':
-        await interaction.reply('Hello, world!');
-        break;
+      case 'hjælp':
+      case 'help':
+      await handleHelp(interaction);
+      break;
 
       case 'beslutninger':
         await handleAsk(interaction);
@@ -231,6 +241,56 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     await handleButton(interaction);
   }
 });
+
+async function handleHelp(i: ChatInputCommandInteraction) {
+  const embed = new EmbedBuilder()
+    .setTitle('🧀 Kunja Hasselmus-bot – Hjælp')
+    .setColor(0xad7aff)
+    .setTimestamp(new Date())
+    .setDescription(
+      'Hej! Jeg er husmusen, der holder styr på backlog, beslutninger og spørgsmål. ' +
+      'Her er hvad jeg kan:'
+    )
+    .addFields(
+      {
+        name: '/ny type:<beslutning|undersøgelse|orientering>',
+        value:
+          'Bruges **inde i en cirkels backlog-kanal** for at oprette et nyt mødepunkt.\n' +
+          '• Du udfylder titel og beskrivelse.\n' +
+          '• Jeg poster et blåt embed med knappen **“Gem i beslutninger”.**',
+      },
+      {
+        name: 'Knappen “Gem i beslutninger”',
+        value:
+          '➡️ Starter et *mødeforløb*.\n' +
+          '1. Hvis intet møde er i gang, beder jeg dig starte et og vælge deltagere.\n' +
+          '2. Mødet varer 3 timer; herefter kan du gemme udfaldet.',
+      },
+      {
+        name: '/beslutninger question:<spørgsmål>',
+        value:
+          'Stil et naturligt sprog-spørgsmål om tidligere beslutninger.\n' +
+          'Jeg svarer som hasselmusen – først en kvik sætning, derefter et formelt svar.',
+      },
+      {
+        name: '/cirkler vis',
+        value:
+          'Viser alle cirkler, deres backlog-kanaler, skrive-roller **og** aktuelle medlemmer.',
+      },
+      {
+        name: 'Roller & rettigheder',
+        value:
+          '• Kun brugere med cirklens *writer-rolle* kan oprette nye punkter.\n' +
+          '• Alle kan læse beslutninger og stille spørgsmål.',
+      },
+      {
+        name: 'Har du spørgsmål?',
+        value: 'Tag fat i en admin eller skriv direkte til mig!',
+      },
+    );
+
+  await i.reply({ embeds: [embed], ephemeral: true });
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // /ask implementation (unchanged)

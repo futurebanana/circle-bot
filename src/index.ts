@@ -499,48 +499,160 @@ client.on('interactionCreate', async (interaction: Interaction) => {
   logger.info({ id: msg.id, circle: circleSlug }, '📌 New backlog item posted');
 });
 
-client.on('interactionCreate', async (inter: Interaction) => {
-  if (!inter.isStringSelectMenu() && !inter.isUserSelectMenu()) return;
-  if (!inter.customId.startsWith('pickParticipants|')) return;
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isUserSelectMenu() || !interaction.customId.startsWith('pickParticipants|')) return;
 
-  const [, circleSlug] = inter.customId.split('|');
-  const ids = inter.values as string[];
+  const [, circleSlug, backlogMsgId] = interaction.customId.split('|');
+  const participantIds = interaction.values as string[];
 
+  // (re-store your meeting state if you want to keep expires logic)
   meetings[circleSlug] = {
-    participants: ids,
+    participants: participantIds,
     expires: Date.now() + MEETING_DURATION_MS,
   };
 
-  const mentions = ids.map(id => `<@${id}>`).join(', ');
+  const modal = new ModalBuilder()
+    .setCustomId(`meetingOutcomeModal|${circleSlug}|${backlogMsgId}|${participantIds.join(',')}`)
+    .setTitle('Møde – Udfald og Opfølgning');
 
-  await inter.update({
-    content: `🟢 Mødet er startet. Deltagere: ${mentions}\n\n(Gyldigt i 3 timer)`,
-    components: [],
-  });
+  const udfaldInput = new TextInputBuilder()
+    .setCustomId('udfald')
+    .setLabel('Udfald')
+    .setStyle(TextInputStyle.Paragraph)
+    .setPlaceholder('Hvad blev beslutningen/konklusionen?')
+    .setRequired(true);
+
+  const agendaTypeInput = new TextInputBuilder()
+    .setCustomId('agendaType')
+    .setLabel('Agenda-type')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('beslutning / undersøgelse / orientering')
+    .setRequired(true);
+
+  const ansvarligInput = new TextInputBuilder()
+    .setCustomId('ansvarlig')
+    .setLabel('Ansvarlig (valgfri)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false);
+
+  const opfoelgningsDatumInput = new TextInputBuilder()
+    .setCustomId('opfoelgningsDato')
+    .setLabel('Næste opfølgningsdato (valgfri)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('f.eks. “næste uge” eller “2025-08-01”')
+    .setRequired(false);
+
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(udfaldInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(agendaTypeInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(ansvarligInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(opfoelgningsDatumInput),
+  );
+
+  await interaction.showModal(modal);
+});
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isModalSubmit() || !interaction.customId.startsWith('meetingOutcomeModal|'))
+    return;
+
+  const [, circleSlug, backlogMsgId, rawParticipants] = interaction.customId.split('|');
+  const participantIds = rawParticipants.split(',');
+
+  // 1) Pull modal values
+  const udfald       = interaction.fields.getTextInputValue('udfald');
+  const agendaType   = interaction.fields.getTextInputValue('agendaType');
+  const ansvarlig    = interaction.fields.getTextInputValue('ansvarlig');
+  const nextDate     = interaction.fields.getTextInputValue('opfoelgningsDato');
+
+  // 2) Fetch original backlog embed to get its title+description
+  const circleCfg      = circles[circleSlug];
+  const backlogChannel = await client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
+  let originalHeadline = '–';
+  let originalDesc     = '–';
+  try {
+    const backlogMsg   = await backlogChannel.messages.fetch(backlogMsgId);
+    const origEmbed    = backlogMsg.embeds[0];
+    originalHeadline   = origEmbed.fields.find(f => f.name === 'Overskrift')?.value ?? originalHeadline;
+    originalDesc       = origEmbed.fields.find(f => f.name === 'Beskrivelse')?.value ?? originalDesc;
+  } catch (err) {
+    logger.warn({ err, backlogMsgId }, 'Kunja: Kunne ikke hente backlog-embed');
+  }
+
+  // 3) Normalize nextDate into ISO if provided
+  let nextIso: string | null = null;
+  if (nextDate) {
+    const d = new Date(nextDate);
+    nextIso = isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+
+  // 4) Build decision embed
+  const authorMention          = `<@${interaction.user.id}>`;
+  const participantsMentions   = participantIds.map(id => `<@${id}>`).join(', ');
+  const colorMap: Record<string, number> = {
+    economy: 0x00ff00,
+    main:    0x3498db,
+  };
+
+  const embed = new EmbedBuilder()
+    .setTitle('📌 Møde-beslutning')
+    .setColor(colorMap[circleSlug] ?? 0x95a5a6)
+    .setTimestamp(new Date())
+    .addFields(
+      { name: 'Forfatter',               value: authorMention,            inline: true  },
+      { name: 'Agenda-type',             value: agendaType,               inline: true  },
+      { name: 'Overskrift',              value: originalHeadline,         inline: false },
+      { name: 'Beskrivelse',             value: originalDesc,             inline: false },
+      { name: 'Udfald',                  value: udfald,                   inline: false },
+      { name: 'Mødedeltagere',           value: participantsMentions,     inline: false },
+      ...(nextIso
+        ? [{ name: 'Næste opfølgningsdato', value: nextIso, inline: true }]
+        : []),
+      ...(ansvarlig
+        ? [{ name: 'Ansvarlig',           value: ansvarlig,                inline: true }]
+        : []),
+      { name: 'meta_data',
+        value: JSON.stringify({
+          next_action_date:         nextIso,
+          next_action_date_handled: false,
+        }),
+        inline: false
+      },
+    );
+
+  // 5) Send & cleanup
+  const decisionsChannel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+  await decisionsChannel.send({ embeds: [embed] });
+
+  // Delete original backlog message
+  try {
+    await backlogChannel.messages.delete(backlogMsgId);
+  } catch (err) {
+    logger.warn({ err, backlogMsgId }, 'Kunja: Kunne ikke slette backlog-embed');
+  }
+
+  await interaction.reply({ content: 'Beslutning gemt og punkt fjernet ✅', ephemeral: true });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
 // Button handler placeholder
 // ────────────────────────────────────────────────────────────────────────────
 async function handleButton(inter: ButtonInteraction) {
-  // 1) SAVE button on a backlog embed
   if (inter.customId === 'saveDecision') {
     const embed = inter.message.embeds[0];
-    const circleField = embed?.fields.find(f => f.name === 'Circle');
-    const circleSlug = circleField?.value;
+    const circleSlug = embed?.fields.find(f => f.name === 'Circle')?.value;
     if (!circleSlug) return inter.reply({ content: '⚠️ Circle mangler på embed.', ephemeral: true });
-
     if (getMeeting(circleSlug)) {
       return inter.reply({ content: '🟢 Mødet kører allerede – mangler kun udfalds-flowet.', ephemeral: true });
     }
 
+    const backlogMsgId = inter.message.id;          // ← grab it here
     const startBtn = new ButtonBuilder()
-      .setCustomId(`startMeeting|${circleSlug}`)
+      .setCustomId(`startMeeting|${circleSlug}|${backlogMsgId}`)
       .setLabel('Start nyt møde')
       .setStyle(ButtonStyle.Success);
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(startBtn);
-
     return inter.reply({
       content: 'Skal vi starte et nyt møde? Tryk på knappen herunder.',
       components: [row],
@@ -548,18 +660,16 @@ async function handleButton(inter: ButtonInteraction) {
     });
   }
 
-  // 2) “Start nyt møde” button
   if (inter.customId.startsWith('startMeeting|')) {
-    const [, circleSlug] = inter.customId.split('|');
+    const [, circleSlug, backlogMsgId] = inter.customId.split('|');
 
     const picker = new UserSelectMenuBuilder()
-      .setCustomId(`pickParticipants|${circleSlug}`)
+      .setCustomId(`pickParticipants|${circleSlug}|${backlogMsgId}`)
       .setPlaceholder('Vælg mødedeltagere…')
       .setMinValues(1)
       .setMaxValues(12);
 
     const row = new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(picker);
-
     return inter.update({
       content: 'Vælg deltagerne til mødet:',
       components: [row],

@@ -1,0 +1,9 @@
+/**
+ * Capitalize a string: first character uppercase, the rest lowercase.
+ * @param {string} s
+ * @returns {string}
+ */
+export function capitalize(s: string): string {
+  if (typeof s !== 'string' || s.length === 0) return s;
+  return s[0].toUpperCase() + s.slice(1).toLowerCase();
+}

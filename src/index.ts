@@ -421,7 +421,7 @@ async function handleStart(i: ChatInputCommandInteraction) {
     await i.reply({ content: 'Hvem deltager i mødet?', components: [row], ephemeral: true });
 }
 
-sync function handleHelp(i: ChatInputCommandInteraction) {
+async function handleHelp(i: ChatInputCommandInteraction) {
   const embed = new EmbedBuilder()
     .setTitle('🧀 Kunja Hasselmus-bot – Hjælp')
     .setColor(0xad7aff)

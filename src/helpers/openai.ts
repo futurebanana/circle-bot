@@ -21,11 +21,11 @@ Today is ${new Date().toISOString().split('T')[0]}.
 Your tasks:
 1. **Spell-check & correct typos** in every "value" string.
 2. **For any field whose "name" contains the substring "Dato"** (case-insensitive):
-   - Interpret its "value" as an arbitrary Danish human‑written date expression (e.g. “3 måneder”, “om 2 uger”, “1. oktober”, “næste mandag”).
-   - If you can successfully parse it to a concrete future date, convert it to ISO format “YYYY-MM-DD”.
-   - If you cannot parse it unambiguously, set it to exactly **14 days from today** in “YYYY-MM-DD” format.
-   - Date MUST be in the future.
-3. **Do not** modify fields whose "name" does not include “Dato” except for typo-fixing.
+   - **If** the value already matches ISO "YYYY-MM-DD" **and** is a future date (>= today), **leave it unchanged**.
+   - **Else** interpret its value as a Danish/free-form date expression (e.g. "om 2 uger”, "1. oktober”, "næste mandag”, "6 måneder”, "Januar 2026").
+     - If you successfully parse it to a future date, convert it to "YYYY-MM-DD".
+     - If you cannot parse unambiguously, **set it to exactly 14 days from today**.
+3. **Do not** modify fields whose "name" does not include "Dato” except for typo-fixing.
 4. **Return** a JSON object with the exact same structure. And post_process_changes if any.
 5. **MUST** Only add ONE new field called "post_process_changes" with your changes as a string.
     - If you made no changes, set it to "No changes made".

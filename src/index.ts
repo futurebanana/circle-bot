@@ -421,54 +421,28 @@ async function handleStart(i: ChatInputCommandInteraction) {
     await i.reply({ content: 'Hvem deltager i mødet?', components: [row], ephemeral: true });
 }
 
-async function handleHelp(i: ChatInputCommandInteraction) {
-    const embed = new EmbedBuilder()
-        .setTitle('🧀 Kunja Hasselmus-bot – Hjælp')
-        .setColor(0xad7aff)
-        .setTimestamp(new Date())
-        .setDescription(
-            'Hej! Jeg er husmusen, der holder styr på backlog, beslutninger og spørgsmål. ' +
-            'Her er hvad jeg kan:'
-        )
-        .addFields(
-            {
-                name: '/ny type:<beslutning|undersøgelse|orientering>',
-                value:
-                    'Bruges **inde i en cirkels backlog-kanal** for at oprette et nyt mødepunkt.\n' +
-                    '• Du udfylder titel og beskrivelse.\n' +
-                    '• Jeg poster et blåt embed med knappen **“Gem i beslutninger”.**',
-            },
-            {
-                name: 'Knappen “Gem i beslutninger”',
-                value:
-                    '➡️ Starter et *mødeforløb*.\n' +
-                    '1. Hvis intet møde er i gang, beder jeg dig starte et og vælge deltagere.\n' +
-                    '2. Mødet varer 3 timer; herefter kan du gemme udfaldet.',
-            },
-            {
-                name: '/beslutninger spørg:<spørgsmål>',
-                value:
-                    'Stil et naturligt sprog-spørgsmål om tidligere beslutninger.\n' +
-                    'Jeg svarer som hasselmusen – først en kvik sætning, derefter et formelt svar.',
-            },
-            {
-                name: '/cirkler vis',
-                value:
-                    'Viser alle cirkler, deres backlog-kanaler, skrive-roller **og** aktuelle medlemmer.',
-            },
-            {
-                name: 'Roller & rettigheder',
-                value:
-                    '• Kun brugere med cirklens *writer-rolle* kan oprette nye punkter.\n' +
-                    '• Alle kan læse beslutninger og stille spørgsmål.',
-            },
-            {
-                name: 'Har du spørgsmål?',
-                value: 'Tag fat i en admin eller skriv direkte til mig!',
-            },
-        );
+sync function handleHelp(i: ChatInputCommandInteraction) {
+  const embed = new EmbedBuilder()
+    .setTitle('🧀 Kunja Hasselmus-bot – Hjælp')
+    .setColor(0xad7aff)
+    .setTimestamp(new Date())
+    .setDescription(
+      'Hej! Jeg er husmusen, der holder styr på møder, backlog, beslutninger og opfølgning.\n\n' +
+      'Her er hvad jeg kan:'
+    )
+    .addFields(
+      { name: '/møde start', value: 'Start et nyt møde i cirklens backlog-kanal og vælg deltagere.\n\n' },
+      { name: '/møde deltagere', value: 'Ændr deltagere for det igangværende møde.\n\n' },
+      { name: '/ny type:<beslutning|undersøgelse|orientering>', value: 'Opret et nyt mødepunkt. Du udfylder titel og beskrivelse, og jeg poster et embed med knappen “Gem i beslutninger”.\n\n' },
+      { name: 'Knappen “Gem i beslutninger”', value: '➡️ Hvis intet møde er startet, beder jeg dig køre /møde start.\n➡️ Når mødet kører, åbner outcome-modalen direkte.\n\n' },
+      { name: '/beslutninger søg <spørgsmål>', value: 'Søg i beslutnings-arkivet med naturligt sprog.\n\n' },
+      { name: '/beslutninger opfølgning', value: 'Vis alle beslutninger med ubehandlede opfølgningsdatoer.\n\n' },
+      { name: '/cirkler vis', value: 'Vis cirkler, deres backlog-kanaler, skrive-roller og aktuelle medlemmer.\n\n' },
+      { name: 'Roller & rettigheder', value: '• Kun brugere med cirklens writer-rolle kan oprette nye punkter.\n• Alle kan læse beslutninger og følge op.' },
+      { name: 'Har du spørgsmål?', value: 'Tag fat i en admin eller skriv direkte til mig!' }
+    );
 
-    await i.reply({ embeds: [embed], ephemeral: true });
+  await i.reply({ embeds: [embed], ephemeral: true });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -794,7 +768,7 @@ async function handleButton(inter: ButtonInteraction) {
     if (!meeting) {
         // No meeting: ask user to run /start
         return inter.reply({
-            content: 'Ingen møde i gang – kør `/start` for at starte et nyt møde.',
+            content: 'Ingen møde i gang – kør `/møde start` for at starte et nyt møde.',
             ephemeral: true,
         });
     }

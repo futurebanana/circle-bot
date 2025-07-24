@@ -73,10 +73,11 @@ const visionChannelId = process.env.VISION_CHANNEL_ID;
 const handbookChannelId = process.env.HANDBOOK_CHANNEL_ID;
 
 // Convert to type ColorMap
-const colorMap = process.env.COLOR_MAP ? JSON.parse(process.env.COLOR_MAP) as ColorMap : {};
-if (!colorMap || typeof colorMap !== 'object') {
-    throw new Error('Invalid COLOR_MAP format. Expected JSON object mapping circle slugs to color codes.');
+const colorMap: ColorMap = {
+    økonomi: 0x27ae60, // green
+    kunja: 0x3498db, // blue
 }
+
 if (!token) throw new Error('BOT_TOKEN missing in .env');
 if (!openaiKey) throw new Error('OPENAI_API_KEY missing in .env');
 if (!decisionChannelId) throw new Error('DECISION_CHANNEL_ID missing in .env');
@@ -107,16 +108,20 @@ function getMeeting(circle: string): MeetingState | undefined {
     return undefined;
 }
 
-type CircleCfg = { backlogChannelId: string; writerRoleIds: string[] };
+type CircleCfg = { backlogChannelId: string; writerRoleIds: string[], circleAlias: string, color: number };
 
 const circles = circlesEnv.split(',').reduce<Record<string, CircleCfg>>((acc, entry) => {
-    const [slug, chanId, roles] = entry.split(':');
-    if (!slug || !chanId || !roles) {
+    const [alias, chanId, roles] = entry.split(':');
+    if (!alias || !chanId || !roles) {
         throw new Error(`Invalid CIRCLES entry "${entry}". Expected slug:channelId:roleId[…].`);
     }
-    acc[slug.trim()] = {
+
+    // Take color from colorMap
+    acc[alias.trim()] = {
         backlogChannelId: chanId.trim(),
         writerRoleIds: roles.split('+').map(r => r.trim()),
+        circleAlias: alias.trim(),
+        color: colorMap[alias.trim()] || 0x999999, // default to gray if not found
     };
     return acc;
 }, {});
@@ -184,18 +189,24 @@ const client = new Client({
 const commands = [
 
     // new admin commands for updating meta tags in decision embeds
-    // /admin change_meta <field:value> <messageId>
     new SlashCommandBuilder()
         .setName('admin')
         .setDescription('Administrative commands')
         .addSubcommand(sub =>
             sub
+                // /admin change_meta <messageId> <method:insert|update|delete> <field> <value>
                 .setName('change_meta')
                 .setDescription('Change a meta field in a decision embed')
                 .addStringOption(opt =>
                     opt
                         .setName('message_id')
                         .setDescription('The message ID of the decision embed to change')
+                        .setRequired(true)
+                )
+                .addStringOption(opt =>
+                    opt
+                        .setName('method')
+                        .setDescription('Insert, update or delete a field')
                         .setRequired(true)
                 )
                 .addStringOption(opt =>
@@ -209,22 +220,29 @@ const commands = [
                         .setName('value')
                         .setDescription('The new value for the field')
                         .setRequired(true)
-                ),
+                )
         )
         .addSubcommand(sub =>
             sub
-                .setName('add_embed')
-                .setDescription('Add a embed field in a decision embed')
+                // /admin change_embed <messageId> <method:insert|update|delete> <field> <value>
+                .setName('change_embed')
+                .setDescription('Change a meta field in a decision embed')
                 .addStringOption(opt =>
                     opt
                         .setName('message_id')
-                        .setDescription('The message ID of the decision embed to add')
+                        .setDescription('The message ID of the decision embed to change')
+                        .setRequired(true)
+                )
+                .addStringOption(opt =>
+                    opt
+                        .setName('method')
+                        .setDescription('Insert, update or delete a field')
                         .setRequired(true)
                 )
                 .addStringOption(opt =>
                     opt
                         .setName('field')
-                        .setDescription('The meta field to add')
+                        .setDescription('The meta field to change')
                         .setRequired(true)
                 )
                 .addStringOption(opt =>
@@ -232,7 +250,7 @@ const commands = [
                         .setName('value')
                         .setDescription('The new value for the field')
                         .setRequired(true)
-                ),
+                )
         ),
 
     // New Command for searching through the Vision and Handbook channels
@@ -446,8 +464,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 async function handleAdminAddEmbed(interaction: ChatInputCommandInteraction) {
     // 1) grab args
     const messageId = interaction.options.getString('message_id', true);
-    const field     = interaction.options.getString('field', true);
-    const value     = interaction.options.getString('value', true);
+    const field = interaction.options.getString('field', true);
+    const value = interaction.options.getString('value', true);
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -489,58 +507,134 @@ async function handleAdminAddEmbed(interaction: ChatInputCommandInteraction) {
     await interaction.editReply(`✅ Tilføjet \`${field}\` til beslutning ${messageId}.`);
 }
 
-// Function to change message embed fields using DecisionMeta type
+/**
+ * Handle admin change meta command
+ * @param interaction
+ * @returns
+ */
 async function handleAdminChangeMeta(interaction: ChatInputCommandInteraction) {
-  // 1) grab args
-  const messageId = interaction.options.getString('message_id', true);
-  const field     = interaction.options.getString('field', true);
-  const value     = interaction.options.getString('value', true);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const messageId = interaction.options.getString('message_id', true);
+    const method = interaction.options.getString('method', true);
+    const field = interaction.options.getString('field', true);
+    const value = interaction.options.getString('value', true);
 
-  // 2) fetch the decision message
-  let channel = await client.channels.fetch(decisionChannelId!) as TextChannel | null;
-  if (!channel) {
-    return interaction.editReply('⚠️ Kunne ikke finde #decisions-kanalen.');
-  }
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  let msg;
-  try {
-    msg = await channel.messages.fetch(messageId);
-  } catch {
-    return interaction.editReply(`⚠️ Kunne ikke finde besked med ID \`${messageId}\`.`);
-  }
+    let channel = await client.channels.fetch(decisionChannelId!) as TextChannel | null;
+    if (!channel) {
+        return interaction.editReply('⚠️ Kunne ikke finde #decisions-kanalen.');
+    }
 
-  const oldEmbed = msg.embeds[0];
-  if (!oldEmbed) {
-    return interaction.editReply('⚠️ Den målrettede besked indeholder ingen embeds.');
-  }
+    let msg;
+    try {
+        msg = await channel.messages.fetch(messageId);
+    } catch {
+        return interaction.editReply(`⚠️ Kunne ikke finde besked med ID \`${messageId}\`.`);
+    }
 
-  // 3) extract and parse meta_data field
-  const fields = [...oldEmbed.fields];
-  const metaIndex = fields.findIndex(f => f.name === 'meta_data');
-  if (metaIndex < 0) {
-    return interaction.editReply('⚠️ Embed mangler et `meta_data`-felt.');
-  }
+    const oldEmbed = msg.embeds[0];
+    if (!oldEmbed) {
+        return interaction.editReply('⚠️ Den målrettede besked indeholder ingen embeds.');
+    }
 
-  let meta: DecisionMeta;
-  try {
-    meta = JSON.parse(fields[metaIndex].value) as DecisionMeta;
-  } catch {
-    return interaction.editReply('⚠️ Kunne ikke læse `meta_data` (ugyldig JSON).');
-  }
-  (meta as any)[field] = value;
+    // Check method
+    if (!['insert', 'update', 'delete'].includes(method)) {
+        return interaction.editReply('⚠️ Ugyldig metode. Brug `insert`, `update` eller `delete`.');
+    }
 
-  // 5) rewrite the embed
-  fields[metaIndex].value = JSON.stringify(meta);
+    const fields = [...oldEmbed.fields];
+    const metaIndex = fields.findIndex(f => f.name === 'meta_data');
+    if (metaIndex < 0) {
+        return interaction.editReply('⚠️ Embed mangler et `meta_data`-felt.');
+    }
 
-  // convert the old embed into a new builder, swapping in our updated fields
-  const api = oldEmbed.toJSON();
-  api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-  const newEmbed = new EmbedBuilder(api);
+    let meta: DecisionMeta;
+    try {
+        meta = JSON.parse(fields[metaIndex].value) as DecisionMeta;
+    } catch {
+        return interaction.editReply('⚠️ Kunne ikke læse `meta_data` (ugyldig JSON).');
+    }
 
-  await msg.edit({ embeds: [newEmbed] });
-  await interaction.editReply(`✅ Opdateret \`${field}\` i \`meta_data\` for beslutning ${messageId}.`);
+    // Check method delete
+    if (method === 'delete') {
+
+        try {
+            // If deleting, ensure the field exists
+            if ((meta as any)[field] === undefined) {
+                return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i \`meta_data\`.`);
+            }
+
+            delete (meta as any)[field];
+
+            fields[metaIndex].value = JSON.stringify(meta);
+            // convert the old embed into a new builder, swapping in our updated fields
+            const api = oldEmbed.toJSON();
+            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
+            const newEmbed = new EmbedBuilder(api);
+            await msg.edit({ embeds: [newEmbed] });
+            await interaction.editReply(`✅ Fjernet \`${field}\` fra \`meta_data\` for beslutning ${messageId}.`);
+        } catch (err) {
+            logger.error('Error deleting field from meta_data', err);
+            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
+            return interaction.editReply(`⚠️ Fejl under sletning af felt \`${field}\`: ${errorMsg}`);
+        }
+
+    } else if (method === 'insert') {
+
+        try {
+            // If inserting, ensure the field is not already present
+            if ((meta as any)[field] !== undefined && (meta as any)[field] !== null && (meta as any)[field] !== '') {
+                logger.warn({meta}, `Field ${field} already exists in meta_data for message ${messageId}`);
+                return interaction.editReply(`⚠️ Felt \`${field}\` findes allerede i \`meta_data\`.`);
+            }
+
+            // Insert field into meta_data
+            (meta as any)[field] = value;
+            // Update the meta_data field in the embed
+            fields[metaIndex].value = JSON.stringify(meta);
+
+            // convert the old embed into a new builder, swapping in our updated fields
+            const api = oldEmbed.toJSON();
+            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
+            const newEmbed = new EmbedBuilder(api);
+
+            await msg.edit({ embeds: [newEmbed] });
+            await interaction.editReply(`✅ Indsat \`${field}\` i \`meta_data\` for beslutning ${messageId}.`);
+        } catch (err) {
+            logger.error('Error inserting field into meta_data', err);
+            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
+            return interaction.editReply(`⚠️ Fejl under indsættelse af felt \`${field}\`: ${errorMsg}`);
+        }
+
+    } else if (method === 'update') {
+
+        try {
+            // If updating, ensure the field exists
+            if ((meta as any)[field] === undefined || (meta as any)[field] === null || (meta as any)[field] === '') {
+                return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i \`meta_data\`.`);
+            }
+
+            // Update the field in meta_data
+            (meta as any)[field] = value;
+            fields[metaIndex].value = JSON.stringify(meta);
+            // convert the old embed into a new builder, swapping in our updated fields
+            const api = oldEmbed.toJSON();
+            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
+            const newEmbed = new EmbedBuilder(api);
+            await msg.edit({ embeds: [newEmbed] });
+            await interaction.editReply(`✅ Opdateret \`${field}\` i \`meta_data\` for beslutning ${messageId}.`);
+        } catch (err) {
+            logger.error('Error updating field in meta_data', err);
+            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
+            return interaction.editReply(`⚠️ Fejl under opdatering af felt \`${field}\`: ${errorMsg}`);
+        }
+
+    }
+
+    return;
+
+
 }
 
 async function handleAskKunja(interaction: ChatInputCommandInteraction) {
@@ -933,7 +1027,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setAuthor({ name: interaction.member?.user.username ?? 'Anon' })
         .setThumbnail(interaction.user.displayAvatarURL() ?? '')
         .addFields(
-            { name: 'Circle', value: circleSlug, inline: true },
+            { name: 'Cirkel', value: circleSlug, inline: true },
             { name: 'Forfatter', value: `<@${interaction.user.id}>`, inline: true },
             { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
             { name: 'Overskrift', value: headline, inline: false },
@@ -1012,7 +1106,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const embed = new EmbedBuilder()
         .setTitle(capitalize(agendaType))
-        .setColor(colorMap[circleSlug] ?? 0x95a5a6)
+        .setColor(colorMap[circleSlug])
         .setTimestamp(new Date())
         .addFields(
             { name: 'Cirkel', value: circleSlug, inline: true },
@@ -1186,7 +1280,7 @@ client.once('ready', async () => {
                 m.embeds.length > 0 &&
                 m.embeds[0].fields.some(f => f.name === 'meta_data')
                 && (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).next_action_date_handled === false ||
-                JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).next_action_date_handled === 'false')
+                    JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).next_action_date_handled === 'false')
             );
 
             logger.info(`Found ${decisionMessages.size} decision messages with meta_data the past ${messageHistoryLimitSec} seconds and next_action_date_handled to put in queue`);
@@ -1375,7 +1469,7 @@ setInterval(async () => {
 
         const due = new Date(meta.next_action_date).getTime();
         logger.info(`Decision ${messageId} next action date is ${new Date(due).toISOString()} (now: ${new Date(now).toISOString()})`);
-        if (now > due) continue;
+        if (now < due) continue;
 
         const circleSlug = embed.fields.find(f => f.name === 'Cirkel')?.value || '–';
         const headline = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_TITLE)?.value || '–';
@@ -1388,7 +1482,7 @@ setInterval(async () => {
         const backlogChannel = await client.channels.fetch(backlogChannelId) as TextChannel;
         const followUpEmbed = new EmbedBuilder()
             .setTitle('Opfølgningspunkt til husmøde')
-            .setColor(colorMap[circleSlug] ?? 0x95a5a6)
+            .setColor(colorMap[circleSlug])
             .setTimestamp(new Date())
             // Set bot as author
             .setAuthor({ name: client.user?.username ?? 'Kunja Hasselmus' })
@@ -1424,7 +1518,7 @@ setInterval(async () => {
             logger.info(`Posted follow-up for ${messageId} to ${backlogChannelId}`);
 
         } catch (err) {
-           logger.error({ err, messageId }, 'Failed to post or mark follow-up');
+            logger.error({ err, messageId }, 'Failed to post or mark follow-up');
         }
 
         // remove from queue

@@ -1,5 +1,5 @@
 type ColorMap = {
-    [key: string]: number; // Maps circle slugs to color codes
+    [key: string]: number;
 }
 
 export { ColorMap };

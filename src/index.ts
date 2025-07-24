@@ -82,6 +82,8 @@ if (!openaiKey) throw new Error('OPENAI_API_KEY missing in .env');
 if (!decisionChannelId) throw new Error('DECISION_CHANNEL_ID missing in .env');
 if (!circlesEnv) throw new Error('CIRCLES missing in .env');
 if (!meetingDurationSec) throw new Error('MEETING_DURATION_SEC missing in .env');
+if (!visionChannelId) throw new Error('VISION_CHANNEL_ID missing in .env');
+if (!handbookChannelId) throw new Error('HANDBOOK_CHANNEL_ID missing in .env');
 
 function parseDuration(duration: string): number {
     const num = parseInt(duration, 10);

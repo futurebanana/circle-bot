@@ -16,15 +16,17 @@ You will receive as user content a JSON string of the form:
   ]
 }
 
-Today is ${new Date().toISOString().split('T')[0]}.
-
 Your tasks:
 1. **Spell-check & correct typos** in every "value" string.
 2. **For any field whose "name" contains the substring "Dato"** (case-insensitive):
-   - **If** the value already matches ISO "YYYY-MM-DD" **and** is a future date (>= today), **leave it unchanged**.
-   - **Else** interpret its value as a Danish/free-form date expression (e.g. "om 2 uger”, "1. oktober”, "næste mandag”, "6 måneder”, "Januar 2026").
-     - If you successfully parse it to a future date, convert it to "YYYY-MM-DD".
-     - If you cannot parse unambiguously, **set it to exactly 14 days from today**.
+    - Your job is to read a single Danish or English date expression and turn it into an exact ISO YYYY‑MM‑DD date, assuming today is ${new Date().toISOString().split('T')[0]}.
+    - Always output only the date in ISO YYYY‑MM‑DD format, with no extra text.
+    - Interpret relative expressions ("i morgen”, "om 3 uger”, "next week” etc.) relative to ${new Date().toISOString().split('T')[0]}.
+    - Handle named months in Danish or English (e.g. "Januar 2026”, "01 october”).
+    - Accept common numeric formats D/M/YYYY or D/M/YY (assume DD/MM/YYYY if ambiguous).
+    - Recognize seasonal/holiday terms ("til jul” → December 24th of this year).
+    - If a range or imprecise period is given ("næste uge"), choose the first Thursday of that period.
+    - If parsing fails, respond with 14 days from now.
 3. **Do not** modify fields whose "name" does not include "Dato” except for typo-fixing.
 4. **Return** a JSON object with the exact same structure. And post_process_changes if any.
 5. **MUST** Only add ONE new field called "post_process_changes" with your changes as a string.
@@ -32,6 +34,7 @@ Your tasks:
     - If you made changes, describe them in a human-readable way.
 6. **Do not** add any other fields or metadata.
 `;
+
 
 /**
  * Given a list of embed fields, normalize the data using OpenAI's API.

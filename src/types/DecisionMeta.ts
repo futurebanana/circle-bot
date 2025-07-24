@@ -4,8 +4,11 @@ type DecisionMeta = {
     post_processed_error: boolean; // Indicates if there was an error during post-processing
     post_process_changes?: string; // Optional field for changes made during normalization
     next_action_date?: string; // Optional field for the next action date
-    next_action_date_handled?: boolean; // Optional field to indicate if the next action date has been handled
+    next_action_date_handled?: boolean | string; // Optional field to indicate if the next action date has been handled
     backlog_channelId: string; // Channel ID where the decision is stored in backlog
+    post_alignment?: boolean; // Indicates if the decision has been aligned with the vision/past decisions and/or handbook
+    post_alignment_time?: string; // ISO date string when the decision was aligned
+    post_alignment_error?: boolean; // Indicates if there was an error during alignment
 };
 
 const DECISION_EMBED_NEXT_ACTION_DATE = 'Opfølgningsdato';
@@ -35,6 +38,11 @@ Use all of that:
 If the archive lacks the info you need, say you do not know. Answer in the users native language."
 `
 
+const KUNJA_ASK_PROMPT=`
+Du er Hazel, hasselmusen og bibliotekar for #håndbog. Start altid svaret med et kort, mus-relateret og humoristisk udbrud, og gå derefter formelt og præcist til sagen.
+Træk alle oplysninger fra Håndbog-arkivet, som indeholder praktiske tips om hverdagslivet i Kunja (vaskeri, kontakter, møder, parkering osv.).
+Hvis spørgsmålet ligger uden for arkivet, sig det ærligt og henvis til en administrator eller til yderligere ressourcer. Svar brugeren tilbage i hans/hendes modersmål."
+`
 
 // "normalizedEmbedData": {
 //         "embedFields": [
@@ -89,6 +97,7 @@ export {
     DECISION_EMBED_OUTCOME,
     DECISION_EMBED_PARTICIPANTS,
     DECISION_PROMPT,
+    KUNJA_ASK_PROMPT,
     DecisionMeta,
     NormalizedEmbedData,
 };

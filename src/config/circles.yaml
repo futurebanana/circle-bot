@@ -4,8 +4,8 @@
     - da: "økonomi"
     - en: "economy"
   backlogChannelId: "1397108027307327529"
-  chatChannelId:    "1397108123456789012"
-  embedColor:       2677619          # green 0x28B463
+  chatChannelId: "1397108123456789012"
+  embedColor: 2677619 # green 0x28B463
   writerRoleIds:
     - "1318094581576896613"
     - "1317922964758335501"
@@ -15,7 +15,7 @@ kunja:
     - da: "kunja"
     - en: "kunja"
   backlogChannelId: "1397108096051970048"
-  chatChannelId:    "1397108234567890123"
-  embedColor:       21196  # blue 0x0052CC
+  chatChannelId: "1397108234567890123"
+  embedColor: 21196 # blue 0x0052CC - test
   writerRoleIds:
     - "1318131407192723487"

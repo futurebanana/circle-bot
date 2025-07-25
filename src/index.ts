@@ -110,7 +110,7 @@ function getMeeting(circle: string): MeetingState | undefined {
 }
 
 export const circles: Record<string, CircleConfig> = yaml.load(
-    fs.readFileSync(path.resolve(__dirname, process.env.CONFIG_FILE_PATH || "./config/circles.yaml"), "utf8")
+    fs.readFileSync(path.resolve(__dirname, process.env.CONFIG_FILE_PATH || "../src/config/circles.yaml"), "utf8")
 ) as Record<string, CircleConfig>;
 
 const backlogChannelIds = new Set(Object.values(circles).map(c => c.backlogChannelId));

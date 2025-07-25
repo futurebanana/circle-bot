@@ -23,9 +23,8 @@ import {
     APIEmbedField,
     MessageFlags,
 } from 'discord.js';
-import OpenAI from 'openai';
 import logger from './logger/index';
-import { applyNormalization, normalizeEmbedDataWithOpenAI, alignDecisionWithOpenAI } from './helpers/openai';
+import { OpenAIInteractions } from './helpers/openai';
 import { capitalize } from './helpers/capitalize';
 import {
     DECISION_EMBED_NEXT_ACTION_DATE,
@@ -44,8 +43,7 @@ import {
 } from './types/DecisionMeta';
 import { CircleConfig } from './types/Circles';
 import { timestampToSnowflake } from './helpers/snowFlake';
-import { AdminHandler } from './handlers/admin';
-
+import { Admin, Backlog, Help } from './handlers';
 // for config.ts
 import fs from "fs";
 import yaml from "js-yaml";
@@ -116,7 +114,7 @@ export const circles: Record<string, CircleConfig> = yaml.load(
 const backlogChannelIds = new Set(Object.values(circles).map(c => c.backlogChannelId));
 
 // Helper: map backlogChannelId → circle name (or undefined)
-function backlogChannelToCircle(channelId: string): string | undefined {
+export function backlogChannelToCircle(channelId: string): string | undefined {
     return Object.entries(circles).find(([, cfg]) => cfg.backlogChannelId === channelId)?.[0];
 }
 
@@ -160,7 +158,7 @@ function memberHasAnyRole(
 // ────────────────────────────────────────────────────────────────────────────
 // External clients
 // ────────────────────────────────────────────────────────────────────────────
-const openai = new OpenAI({ apiKey: openaiKey });
+const openai = new OpenAIInteractions(openaiKey!);
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -317,72 +315,6 @@ const commands = [
 ].map(cmd => cmd.toJSON());
 
 // ────────────────────────────────────────────────────────────────────────────
-// /kø implementation: list queued next‐action decisions
-// ────────────────────────────────────────────────────────────────────────────
-async function handleQueueList(i: ChatInputCommandInteraction) {
-
-    const channel = await client.channels.fetch(decisionChannelId!) as TextChannel;
-    const historyLimitMs = messageHistoryLimitSec * 1000;
-    const afterSF = timestampToSnowflake(Date.now() - historyLimitMs);
-
-    // fetch recent decisions
-    const all = await channel.messages.fetch({ limit: 100, after: afterSF });
-    const queued = all.filter(msg => {
-        if (!msg.embeds.length) return false;
-        const md = msg.embeds[0].fields.find(f => f.name === 'meta_data');
-        if (!md) return false;
-        try {
-            const meta: DecisionMeta = JSON.parse(md.value);
-            return !!meta.next_action_date && (meta.next_action_date_handled === false || meta.next_action_date_handled === 'false');
-        } catch {
-            return false;
-        }
-    });
-
-    if (!queued.size) {
-        return i.reply({ content: '✅ Ingen beslutninger i køen lige nu.', flags: MessageFlags.Ephemeral });
-    }
-
-    // build lines
-    const guildId = i.guildId;
-    const lines = Array.from(queued.values()).map((msg, idx) => {
-        const embed = msg.embeds[0];
-        const dateField = embed.fields.find(f => f.name === DECISION_EMBED_NEXT_ACTION_DATE);
-        const respField = embed.fields.find(f => f.name === DECISION_EMBED_NEXT_ACTION_DATE_RESPONSIBLE);
-        const titleField = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_TITLE);
-        const date = dateField?.value ?? '–';
-        const resp = respField?.value ? ` (Ansvarlig: ${respField.value})` : '';
-        const title = titleField?.value ?? 'Uden titel';
-        const url = `https://discord.com/channels/${guildId}/${decisionChannelId}/${msg.id}`;
-        return `**${idx + 1}.** [${title}](${url}) – ${date}${resp}`;
-    });
-
-    // paginate if needed
-    const chunk = lines.slice(0, 10).join('\n');
-    const more = lines.length > 10 ? `\n…og ${lines.length - 10} mere` : '';
-
-    await i.reply({
-        embeds: [
-            new EmbedBuilder()
-                .setTitle('🗓️ Beslutninger i opfølgnings-kø')
-                .setColor(0xFFA500)
-                .setDescription(chunk + more)
-        ],
-        flags: MessageFlags.Ephemeral
-    });
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// plug into the dispatcher
-// ────────────────────────────────────────────────────────────────────────────
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName === 'kø') {
-        await handleQueueList(interaction);
-    }
-});
-
-// ────────────────────────────────────────────────────────────────────────────
 // Interaction dispatcher
 // ────────────────────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction: Interaction) => {
@@ -395,7 +327,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
             const sub = interaction.options.getSubcommand();
             switch (sub) {
                 case 'start':
-                    return handleStart(interaction);
+                    const meeting = new Meeting(client, decisionChannelId!);
+                    return await meeting.start(interaction);
                 case 'deltagere':
                     return handleChangeMembers(interaction);
             }
@@ -407,18 +340,19 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 case 'søg':
                     return handleAsk(interaction);
                 case 'opfølgning':
-                    return handleQueueList(interaction);
+                    const backlog = new Backlog(client, decisionChannelId!);
+                    return await backlog.queueList(interaction, messageHistoryLimitSec);
             }
         }
 
         if (commandName === 'admin') {
             const sub = interaction.options.getSubcommand();
-            const adminHandler = new AdminHandler(client, decisionChannelId!);
+            const adminHandler = new Admin(client, decisionChannelId!);
             switch (sub) {
                 case 'change_meta':
-                    return adminHandler.meta(interaction);
+                    return await adminHandler.meta(interaction);
                 case 'change_embed':
-                    return adminHandler.embed(interaction);
+                    return await adminHandler.embed(interaction);
             }
         }
 
@@ -428,7 +362,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 break;
             case 'hjælp':
             case 'help':
-                await handleHelp(interaction);
+                const help = new Help(client, decisionChannelId!);
+                await help.help(interaction);
                 break;
             case 'ny':
                 await handleNew(interaction);
@@ -465,25 +400,16 @@ async function handleAskKunja(interaction: ChatInputCommandInteraction) {
         return;
     }
 
-    const archive = texts.join('\n\n---\n\n');
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: KUNJA_ASK_PROMPT },
-        { role: 'user', content: `Archive:\n${archive}` },
-        { role: 'user', content: question },
-    ];
-
     try {
+        const archive = texts.join('\n\n---\n\n');
+        const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+            { role: 'system', content: KUNJA_ASK_PROMPT },
+            { role: 'user', content: `Archive:\n${archive}` },
+            { role: 'user', content: question },
+        ];
+
         logger.info({ question, chars: archive.length }, '🤖 Sending Vision/Handbook question to OpenAI');
-
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: messages as any,
-            temperature: 0.2,
-            max_tokens: 500,
-        });
-
-        const answer = completion.choices[0].message?.content?.trim() || 'No answer generated.';
-        await interaction.editReply(answer);
+        await interaction.editReply(await openai.chat(messages, 0.2, 500));
     } catch (err: any) {
         logger.error('OpenAI error', err);
         await interaction.editReply(`OpenAI error: ${err.message ?? err}`);
@@ -585,73 +511,6 @@ client.on('interactionCreate', async (interaction) => {
     });
 });
 
-async function handleStart(i: ChatInputCommandInteraction) {
-    const circleName = backlogChannelToCircle(i.channelId);
-    if (!circleName) {
-        return i.reply({ content: '⚠️  Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
-    }
-
-    const picker = new UserSelectMenuBuilder()
-        .setCustomId(`pickParticipants|${circleName}`)
-        .setPlaceholder('Vælg mødedeltagere…')
-        .setMinValues(1)
-        .setMaxValues(12);
-
-    const row = new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(picker);
-    await i.reply({ content: 'Hvem deltager i mødet?', components: [row], flags: MessageFlags.Ephemeral });
-}
-
-async function handleHelp(i: ChatInputCommandInteraction) {
-
-    const helpText = `
-🧀 **Kunja Hasselmus-bot – Hjælp**
-
-Hej! Jeg er husmusen, der holder styr på møder, backlog, beslutninger og opfølgning. Her er hvad jeg kan:
-
-### Søg i vores Vision/Håndbog med naturligt sprog.
-\`\`\`
-/kunja <spørgsmål>
-\`\`\`
-Spørg mig om vores vision, håndbog som feks hvor vaskeriet er, eller hvordan vi håndterer beslutninger. Jeg vil søge i vores Vision og Håndbog kanaler og give dig svar.
-### Start et nyt møde
-\`\`\`
-/møde start
-\`\`\`
-Start et nyt møde i cirklens backlog-kanal og vælg deltagere.
-### Ændre deltagerlisten for det igangværende møde.
-\`\`\`
-/møde deltagere
-\`\`\`
-### Opret et nyt mødepunkt
-\`\`\`
-/ny type:<beslutning|undersøgelse|orientering>
-\`\`\`
-Du udfylder titel og beskrivelse, og jeg poster et embed med knappen **“Gem i beslutninger”**.
-
-### 💾 Knappen “Gem i beslutninger”
-➡️ Hvis intet møde er startet, beder jeg dig køre \`/møde start\`.
-➡️ Når mødet kører, kan du udfylde udfald og gemme punktet som en beslutning.
-
-### Søg i beslutnings-arkivet med naturligt sprog.
-\`\`\`
-/beslutninger søg <spørgsmål>
-\`\`\`
-### Vis alle beslutninger med ubehandlede opfølgningsdatoer.
-\`\`\`
-/beslutninger opfølgning
-\`\`\`
-### Vis cirkler, deres backlog-kanaler, skrive-roller og aktuelle medlemmer.
-\`\`\`
-/cirkler vis
-\`\`\`
-### 🔐 Roller & rettigheder
-- Kun brugere med skrive rettigheder til cirklens backlog kan oprette nye punkter.
-- Alle kan læse beslutninger og følge op.
-`;
-
-    await i.reply({ content: helpText, flags: MessageFlags.Ephemeral });
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // /ask implementation
 // ────────────────────────────────────────────────────────────────────────────
@@ -708,16 +567,7 @@ async function handleAsk(interaction: ChatInputCommandInteraction) {
 
     try {
         logger.info({ question, chars: archive.length }, '🤖 Sending question to OpenAI');
-
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: messages as any,
-            temperature: 0.2,
-            max_tokens: 500,
-        });
-
-        const answer = completion.choices[0].message?.content?.trim() || 'No answer generated.';
-        await interaction.editReply(answer);
+        await interaction.editReply(await openai.chat(messages, 0.2, 500));
     } catch (err: any) {
         logger.error('OpenAI error', err);
         await interaction.editReply(`OpenAI error: ${err.message ?? err}`);
@@ -1277,7 +1127,7 @@ async function alignDecisionWithVisionAndHandbook(msg: Message): Promise<void> {
         const visionArchive = await getMessagesAsArchive(visionChannelId!);
         const handbookArchive = await getMessagesAsArchive(handbookChannelId!);
 
-        let alignmentData: DecisionAlignmentData = await alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
+        let alignmentData: DecisionAlignmentData = await openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
 
         if (alignmentData.should_raise_objection) {
             // Try/catch to check for raising an objection.
@@ -1330,7 +1180,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
         // Removed the meta_data field from embedFields. AI should not change this.
         embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
 
-        let normalizedEmbedData: NormalizedEmbedData = await normalizeEmbedDataWithOpenAI(embedFields);
+        let normalizedEmbedData: NormalizedEmbedData = await openai.normalizeEmbedDataWithOpenAI(embedFields);
 
         // Check JSON diff between normalizedEmbedData and original embedFields
         logger.info({ normalizedEmbedData, embedFields }, `Checking if normalization is needed for message ${msg.id}`);
@@ -1338,7 +1188,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
             // Try/catch to apply normalization.
             try {
                 logger.info(`Auto-normalized decision ${msg.id} → ${JSON.stringify(normalizedEmbedData)}`);
-                await applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
+                await openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
                 logger.info(`✅ Applied normalization to message ${msg.id}`);
             } catch (err) {
                 logger.error({ err, msgId: msg.id }, '❌ Failed to apply normalization');

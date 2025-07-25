@@ -2,242 +2,217 @@ import OpenAI from 'openai';
 import { Message, EmbedBuilder, APIEmbedField } from 'discord.js';
 import logger from '../logger';
 import { DecisionMeta, NormalizedEmbedData, DecisionAlignmentData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/DecisionMeta';
-import { log } from 'console';
+import { SYSTEM_PROMPT, ALIGNMENT_PROMPT } from '../types/prompts';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Multiline system prompt for OpenAI
-const SYSTEM_PROMPT = `
-You are a helpful assistant that post-processes meeting-decision embeds.
-You will receive as user content a JSON string of the form:
-{
-  "embedFields": [
-    { "name": "...", "value": "..." },
-    …
-  ]
-}
+// Class for OpenAI API interaction
+class OpenAIInteractions {
 
-Your tasks:
-1. **Spell-check & correct typos** in every "value" string.
-2. **For any field whose "name" contains the substring "Dato"** (case-insensitive):
-    - Your job is to read a single Danish or English date expression and turn it into an exact ISO YYYY‑MM‑DD date, assuming today is ${new Date().toISOString().split('T')[0]}.
-    - Always output only the date in ISO YYYY‑MM‑DD format, with no extra text.
-    - Interpret relative expressions ("i morgen”, "om 3 uger”, "next week” etc.) relative to ${new Date().toISOString().split('T')[0]}.
-    - Handle named months in Danish or English (e.g. "Januar 2026”, "01 october”).
-    - Accept common numeric formats D/M/YYYY or D/M/YY (assume DD/MM/YYYY if ambiguous).
-    - Recognize seasonal/holiday terms ("til jul” → December 24th of this year).
-    - If a range or imprecise period is given ("næste uge"), choose the first Thursday of that period.
-    - If parsing fails, respond with 14 days from now.
-3. **Do not** modify fields whose "name" does not include "Dato” except for typo-fixing.
-4. **Return** a JSON object with the exact same structure. And post_process_changes if any.
-5. **MUST** Only add ONE new field called "post_process_changes" with your changes as a string.
-    - If you made no changes, set it to "No changes made".
-    - If you made changes, describe them in a human-readable way.
-6. **Do not** add any other fields or metadata.
-`;
+    private openai: OpenAI;
+    private systemPrompt: string;
+    private alignmentPrompt: string;
+    private model = 'gpt-4o-mini';
 
-const ALIGNMENT_PROMPT = `
-Here’s the revised system-prompt with your new requirements baked in:
+    constructor(apiKey: string) {
 
-You are a sociocratic facilitator AI for the Kunja community. Your job is to ensure that any group decision aligns with:
-  • The community’s shared vision
-  • The handbook of practices
-  • Earlier decisions made by consent
+        if (!apiKey) {
+            throw new Error('OpenAI API key is required');
+        }
 
-**Crucially**, recognize that decisions reached by the community through sociocratic consent are considered “correct” expressions of our collective will. If you detect a conflict between a newly proposed decision and the vision or handbook, you should:
+        this.openai = new OpenAI({ apiKey });
+        this.systemPrompt = SYSTEM_PROMPT;
+        this.alignmentPrompt = ALIGNMENT_PROMPT;
+    }
 
-  1. Set "should_raise_objection": true.
-  2. Provide a concise (≤100 words) "raised_objection_reason" explaining the conflict.
-  3. **Additionally**, suggest a revision to the vision or handbook (in 1–2 sentences) that would bring them into harmony with this consented decision.
+    public async chat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, temperature: number, max_tokens: number): Promise<string> {
 
-If there is **no** conflict, set:
-  • "should_raise_objection": false
-  • "raised_objection_reason": null
-
-You will receive as user content a JSON string:
-
-{
-  "embedFields": [
-    { "name": "...", "value": "..." },
-    …
-  ]
-}
-
-Return **only** a JSON object with exactly these two keys (plus your brief suggested rewrite when raising an objection). Do **not** modify embedFields or add any extra fields.
-
-**Example when raising an objection & suggesting a rewrite**:
-
-{"should_raise_objection": true, "suggested_revision": "Update handbook section on cost-sharing to allow household-based splits when consented by all members."}
-
-`;
-
-/**
- * Given a list of embed fields, normalize the data using OpenAI's API.
- * The system prompt is used to guide the model on how to process the embed fields.
- * Returns the normalized data as a string, or null if normalization fails.
- */
-export async function normalizeEmbedDataWithOpenAI(embedFields: APIEmbedField[]): Promise<NormalizedEmbedData> {
-
-    logger.info({ embedFields }, `Normalizing embed data with OpenAI`);
-    try {
-        // Check embedFields is valid JSON
-        let embedFieldsJSON = JSON.stringify(embedFields);
-
-        logger.info({ SYSTEM_PROMPT }, `Using OpenAI system prompt for embed normalization`);
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            temperature: 0,
-            messages: [
-                { role: 'system', content: SYSTEM_PROMPT },
-                { role: 'user', content: embedFieldsJSON },
-            ]
+        const completion = await this.openai.chat.completions.create({
+            model: this.model,
+            messages: messages,
+            temperature: temperature,
+            max_tokens: max_tokens,
         });
 
-        const rawReturnMessage = completion.choices[0].message?.content?.trim() ?? '';
-        const parsed = JSON.parse(rawReturnMessage);
-        logger.info({ parsed }, `Parsed OpenAI response for embed normalization`);
-        return parsed;
+        const answer = completion.choices[0].message?.content?.trim() || 'No answer generated.';
 
-    } catch (err) {
-        logger.warn({ err, embedFields }, 'normalizeEmbedDataWithOpenAI: Invalid embedFields JSON');
-        // Return empty object if normalization fails
-        return {
-            embedFields: [],
-            post_process_changes: 'No changes made',
-            post_processed_error: true, // Indicate there was an error during post-processing
-        };
+        return answer;
+
     }
-}
 
-export async function alignDecisionWithOpenAI(embedFields: APIEmbedField[], visionArchive: string[], handbookArchive: string[]): Promise<DecisionAlignmentData> {
-    // Parse the embed fields into a JSON string
-    const embedFieldsJSON = JSON.stringify(embedFields);
-    const archives = JSON.stringify({ visionArchive, handbookArchive })
+    /**
+     * Given a list of embed fields, normalize the data using OpenAI's API.
+     * The system prompt is used to guide the model on how to process the embed fields.
+     * Returns the normalized data as a string, or null if normalization fails.
+     */
+    public async normalizeEmbedDataWithOpenAI(embedFields: APIEmbedField[]): Promise<NormalizedEmbedData> {
 
-    try {
-
-        logger.info({ ALIGNMENT_PROMPT, embedFieldsJSON, archives }, `Using OpenAI system prompt for decision alignment`);
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            temperature: 0.5,
-            messages: [
-                { role: 'system', content: ALIGNMENT_PROMPT },
-                { role: 'user', content: embedFieldsJSON },
-                { role: 'user', content: archives },
-            ]
-        });
-
-        logger.info({ completion }, `Received OpenAI response for decision alignment`);
-
-        /**
-         * Returns a JSON object with the following structure:
-         * {
-            "should_raise_objection": true,
-            "suggested_revision": "Update handbook section on cost-sharing to allow household-based splits when consented by all members."
-            }
-
-        */
-        const rawReturnMessage = completion.choices[0].message?.content?.trim() ?? '';
-        logger.info({ rawReturnMessage }, `Parsed OpenAI response for decision alignment`);
-
-        // Convert rawReturnMessage to JSON
-        const parsed = JSON.parse(rawReturnMessage);
-
-        return {
-            should_raise_objection: parsed.should_raise_objection || false,
-            suggested_revision: parsed.suggested_revision || undefined
-        };
-
-    } catch (err) {
-        logger.error({ err, embedFields }, 'alignDecisionWithOpenAI: Failed to align decision with OpenAI');
-        return {
-            should_raise_objection: false,
-            suggested_revision: undefined,
-        };
-    }
-}
-
-/**
- * Edit a decision embed message, swapping ALL of the embed field/value pairs
- * with the normalized data provided.
- */
-export async function applyNormalization(
-    message: Message,
-    normalized: string,
-    postProcessChanges?: string,
-    postProcessedError?: boolean
-): Promise<void> {
-
-    try {
-
-        if (!message.embeds.length) return;
-        const originalEmbed = message.embeds[0];
-
-        // 1) Parse the helper’s JSON payload
-        let payload: { embedFields: Array<{ name: string; value: string }> };
+        logger.info({ embedFields }, `Normalizing embed data with OpenAI`);
         try {
-            payload = JSON.parse(normalized);
-        } catch {
-            throw new Error('Invalid normalized JSON payload');
+            // Check embedFields is valid JSON
+            let embedFieldsJSON = JSON.stringify(embedFields);
+
+            logger.info(`Using OpenAI system prompt for embed normalization`);
+            const completion = await this.openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                temperature: 0,
+                messages: [
+                    { role: 'system', content: this.systemPrompt },
+                    { role: 'user', content: embedFieldsJSON },
+                ]
+            });
+
+            const rawReturnMessage = completion.choices[0].message?.content?.trim() ?? '';
+            const parsed = JSON.parse(rawReturnMessage);
+            logger.info({ parsed }, `Parsed OpenAI response for embed normalization`);
+            return parsed;
+
+        } catch (err) {
+            logger.warn({ err, embedFields }, 'normalizeEmbedDataWithOpenAI: Invalid embedFields JSON');
+            // Return empty object if normalization fails
+            return {
+                embedFields: [],
+                post_process_changes: 'No changes made',
+                post_processed_error: true, // Indicate there was an error during post-processing
+            };
         }
-
-        // 2) Extract and update the existing meta_data
-        const metaField = originalEmbed.fields.find(f => f.name === 'meta_data');
-        let meta: DecisionMeta = {
-            post_process: false,
-            post_processed_error: false,
-            backlog_channelId: message.channel.id, // Use the current channel ID
-        };
-        if (metaField) {
-            try {
-                meta = JSON.parse(metaField.value);
-            } catch {
-                throw new Error('Invalid meta_data JSON in embed');
-            }
-        }
-        // Add postProcessChanges to meta if provided
-        if (postProcessChanges) {
-            meta.post_process_changes = postProcessChanges;
-        }
-        if (postProcessedError !== undefined) {
-            meta.post_processed_error = postProcessedError;
-        } else {
-            meta.post_processed_error = false;
-        }
-        meta.post_process = true;
-        meta.post_processed_time = new Date().toISOString();
-
-        // 3) Build the new fields array from payload.embedFields
-        const newFields = payload.embedFields.map(f => ({
-            name: f.name,
-            value: f.value,
-            inline: false,
-        }));
-
-        // Add meta.next_action_date if it exists in newFields name: Opfølgningsdato
-        const nextActionDateField = newFields.find(f => f.name === DECISION_EMBED_NEXT_ACTION_DATE);
-        if (nextActionDateField) {
-            logger.info(`Found next action date field and adding to meta: ${nextActionDateField.value}`);
-            // If next_action_date exists, set it in meta
-            meta.next_action_date = nextActionDateField.value;
-            meta.next_action_date_handled = false; // Set to false to indicate it needs handling
-        }
-
-        // 4) Append the updated meta_data field
-        newFields.push({
-            name: 'meta_data',
-            value: JSON.stringify(meta),
-            inline: false,
-        });
-
-        // 5) Create a new embed, preserving title/color/etc, but replacing fields
-        const updatedEmbed = EmbedBuilder.from(originalEmbed)
-            .setFields(newFields);
-
-        // 6) Push the edit
-        await message.edit({ embeds: [updatedEmbed] });
-    } catch (err) {
-        logger.error({ err, messageId: message.id }, 'applyNormalization: Failed to apply normalization');
-        throw err; // Re-throw to handle upstream if needed
     }
+
+    public async alignDecisionWithOpenAI(embedFields: APIEmbedField[], visionArchive: string[], handbookArchive: string[]): Promise<DecisionAlignmentData> {
+
+        // Parse the embed fields into a JSON string
+        const embedFieldsJSON = JSON.stringify(embedFields);
+        const archives = JSON.stringify({ visionArchive, handbookArchive })
+        const alignmentPromt = this.alignmentPrompt;
+
+        try {
+
+            logger.info({ alignmentPromt, embedFieldsJSON, archives }, `Using OpenAI system prompt for decision alignment`);
+            const completion = await this.openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                temperature: 0.5,
+                messages: [
+                    { role: 'system', content: alignmentPromt },
+                    { role: 'user', content: embedFieldsJSON },
+                    { role: 'user', content: archives },
+                ]
+            });
+
+            logger.info({ completion }, `Received OpenAI response for decision alignment`);
+
+            /**
+             * Returns a JSON object with the following structure:
+             * {
+                "should_raise_objection": true,
+                "suggested_revision": "Update handbook section on cost-sharing to allow household-based splits when consented by all members."
+                }
+
+            */
+            const rawReturnMessage = completion.choices[0].message?.content?.trim() ?? '';
+            logger.info({ rawReturnMessage }, `Parsed OpenAI response for decision alignment`);
+
+            // Convert rawReturnMessage to JSON
+            const parsed = JSON.parse(rawReturnMessage);
+
+            return {
+                should_raise_objection: parsed.should_raise_objection || false,
+                suggested_revision: parsed.suggested_revision || undefined
+            };
+
+        } catch (err) {
+            logger.error({ err, embedFields }, 'alignDecisionWithOpenAI: Failed to align decision with OpenAI');
+            return {
+                should_raise_objection: false,
+                suggested_revision: undefined,
+            };
+        }
+    }
+
+    /**
+     * Edit a decision embed message, swapping ALL of the embed field/value pairs
+     * with the normalized data provided.
+     */
+    public async applyNormalization(message: Message, normalized: string, postProcessChanges?: string, postProcessedError?: boolean): Promise<boolean> {
+
+        try {
+
+            if (!message.embeds.length) {
+                logger.warn({ messageId: message.id }, 'applyNormalization: Message has no embeds');
+                return false;
+            }
+
+            const originalEmbed = message.embeds[0];
+
+            // 1) Parse the helper’s JSON payload
+            let payload: { embedFields: Array<{ name: string; value: string }> };
+            try {
+                payload = JSON.parse(normalized);
+            } catch {
+                throw new Error('Invalid normalized JSON payload');
+            }
+
+            // 2) Extract and update the existing meta_data
+            const metaField = originalEmbed.fields.find(f => f.name === 'meta_data');
+            let meta: DecisionMeta = {
+                post_process: false,
+                post_processed_error: false,
+                backlog_channelId: message.channel.id, // Use the current channel ID
+            };
+            if (metaField) {
+                try {
+                    meta = JSON.parse(metaField.value);
+                } catch {
+                    throw new Error('Invalid meta_data JSON in embed');
+                }
+            }
+            // Add postProcessChanges to meta if provided
+            if (postProcessChanges) {
+                meta.post_process_changes = postProcessChanges;
+            }
+            if (postProcessedError !== undefined) {
+                meta.post_processed_error = postProcessedError;
+            } else {
+                meta.post_processed_error = false;
+            }
+            meta.post_process = true;
+            meta.post_processed_time = new Date().toISOString();
+
+            // 3) Build the new fields array from payload.embedFields
+            const newFields = payload.embedFields.map(f => ({
+                name: f.name,
+                value: f.value,
+                inline: false,
+            }));
+
+            // Add meta.next_action_date if it exists in newFields name: Opfølgningsdato
+            const nextActionDateField = newFields.find(f => f.name === DECISION_EMBED_NEXT_ACTION_DATE);
+            if (nextActionDateField) {
+                logger.info(`Found next action date field and adding to meta: ${nextActionDateField.value}`);
+                // If next_action_date exists, set it in meta
+                meta.next_action_date = nextActionDateField.value;
+                meta.next_action_date_handled = false; // Set to false to indicate it needs handling
+            }
+
+            // 4) Append the updated meta_data field
+            newFields.push({
+                name: 'meta_data',
+                value: JSON.stringify(meta),
+                inline: false,
+            });
+
+            // 5) Create a new embed, preserving title/color/etc, but replacing fields
+            const updatedEmbed = EmbedBuilder.from(originalEmbed)
+                .setFields(newFields);
+
+            // 6) Push the edit
+            await message.edit({ embeds: [updatedEmbed] });
+        } catch (err) {
+            logger.error({ err, messageId: message.id }, 'applyNormalization: Failed to apply normalization');
+            throw err; // Re-throw to handle upstream if needed
+        }
+
+        return true;
+    }
+
 }
+
+export { OpenAIInteractions };

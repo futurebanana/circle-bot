@@ -1,21 +1,14 @@
 import { ChatInputCommandInteraction, EmbedBuilder, MessageFlags, TextChannel, APIEmbedField } from 'discord.js';
 import logger from '../logger';
 import { DecisionMeta } from '../types/DecisionMeta';
+import { Discord } from './Discord';
 
 /**
  * Class for admnin-related functionalities.
  * Handles commands like changing meta data and adding embeds.
  */
 
-class AdminHandler {
-
-    private client: any;
-    private decisionChannelId: string;
-
-    constructor(client: any, decisionChannelId: string) {
-        this.client = client;
-        this.decisionChannelId = decisionChannelId;
-    }
+class Admin extends Discord {
 
     // Function to insert,delete or update embed field
     async embed(interaction: ChatInputCommandInteraction) {
@@ -235,4 +228,4 @@ class AdminHandler {
 
 }
 
-export { AdminHandler };
+export { Admin };

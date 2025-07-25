@@ -3,7 +3,7 @@
 VERSION ?= $(shell git rev-parse --short HEAD)
 APP_NAME ?= circle-bot
 
-all: lint build test deploy
+all: lint build test deploy scale logs
 
 build:
 	@echo "Building the project..."

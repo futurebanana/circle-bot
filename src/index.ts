@@ -25,7 +25,7 @@ import {
 } from 'discord.js';
 import OpenAI from 'openai';
 import logger from './logger/index';
-import { applyNormalization, normalizeEmbedDataWithOpenAI } from './helpers/openai';
+import { applyNormalization, normalizeEmbedDataWithOpenAI, alignDecisionWithOpenAI } from './helpers/openai';
 import { capitalize } from './helpers/capitalize';
 import {
     DECISION_EMBED_NEXT_ACTION_DATE,
@@ -40,9 +40,16 @@ import {
     KUNJA_ASK_PROMPT,
     DecisionMeta,
     NormalizedEmbedData,
+    DecisionAlignmentData,
 } from './types/DecisionMeta';
-import { ColorMap } from './types/ColorMap';
+import { CircleConfig } from './types/Circles';
 import { timestampToSnowflake } from './helpers/snowFlake';
+import { AdminHandler } from './handlers/admin';
+
+// for config.ts
+import fs from "fs";
+import yaml from "js-yaml";
+import path from "path";
 
 /**
  * Kunja bot – /hello, /ask, /new, /circles list (multi‑circle backlog) in TypeScript.
@@ -63,7 +70,6 @@ import { timestampToSnowflake } from './helpers/snowFlake';
 const token = process.env.BOT_TOKEN;
 const openaiKey = process.env.OPENAI_API_KEY;
 const decisionChannelId = process.env.DECISION_CHANNEL_ID;
-const circlesEnv = process.env.CIRCLES; // e.g. "economy:111,main:222"
 const testGuildId = process.env.TEST_GUILD_ID;
 const meetingDurationSec = process.env.MEETING_DURATION_SEC || '10800'; // default 3 hours
 const messageHistoryLimitSec = parseInt(process.env.MESSAGE_HISTORY_LIMIT_SEC || '604800', 10); // default 7 days
@@ -71,20 +77,15 @@ const postProcessIntervalSec = parseInt(process.env.POST_PROCESS_INTERVAL_SEC ||
 const queueNextActionIntervalSec = parseInt(process.env.QUEUE_NEXT_ACTION_INTERVAL_SEC || '60', 10); // default 60 seconds
 const visionChannelId = process.env.VISION_CHANNEL_ID;
 const handbookChannelId = process.env.HANDBOOK_CHANNEL_ID;
-
-// Convert to type ColorMap
-const colorMap: ColorMap = {
-    økonomi: 0x27ae60, // green
-    kunja: 0x3498db, // blue
-}
+const postDaysBeforeDueDate = parseInt(process.env.POST_DAYS_BEFORE_DUE_DATE || '7', 10); // default 7 days
 
 if (!token) throw new Error('BOT_TOKEN missing in .env');
 if (!openaiKey) throw new Error('OPENAI_API_KEY missing in .env');
 if (!decisionChannelId) throw new Error('DECISION_CHANNEL_ID missing in .env');
-if (!circlesEnv) throw new Error('CIRCLES missing in .env');
 if (!meetingDurationSec) throw new Error('MEETING_DURATION_SEC missing in .env');
 if (!visionChannelId) throw new Error('VISION_CHANNEL_ID missing in .env');
 if (!handbookChannelId) throw new Error('HANDBOOK_CHANNEL_ID missing in .env');
+if (!postDaysBeforeDueDate) throw new Error('POST_DAYS_BEFORE_DUE_DATE missing in .env');
 
 function parseDuration(duration: string): number {
     const num = parseInt(duration, 10);
@@ -108,28 +109,14 @@ function getMeeting(circle: string): MeetingState | undefined {
     return undefined;
 }
 
-type CircleCfg = { backlogChannelId: string; writerRoleIds: string[], circleAlias: string, color: number };
-
-const circles = circlesEnv.split(',').reduce<Record<string, CircleCfg>>((acc, entry) => {
-    const [alias, chanId, roles] = entry.split(':');
-    if (!alias || !chanId || !roles) {
-        throw new Error(`Invalid CIRCLES entry "${entry}". Expected slug:channelId:roleId[…].`);
-    }
-
-    // Take color from colorMap
-    acc[alias.trim()] = {
-        backlogChannelId: chanId.trim(),
-        writerRoleIds: roles.split('+').map(r => r.trim()),
-        circleAlias: alias.trim(),
-        color: colorMap[alias.trim()] || 0x999999, // default to gray if not found
-    };
-    return acc;
-}, {});
+export const circles: Record<string, CircleConfig> = yaml.load(
+    fs.readFileSync(path.resolve(__dirname, process.env.CONFIG_FILE_PATH || "./config/circles.yaml"), "utf8")
+) as Record<string, CircleConfig>;
 
 const backlogChannelIds = new Set(Object.values(circles).map(c => c.backlogChannelId));
 
-// Helper: map channelId → circle slug (or undefined)
-function channelToCircle(channelId: string): string | undefined {
+// Helper: map backlogChannelId → circle name (or undefined)
+function backlogChannelToCircle(channelId: string): string | undefined {
     return Object.entries(circles).find(([, cfg]) => cfg.backlogChannelId === channelId)?.[0];
 }
 
@@ -426,11 +413,12 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
         if (commandName === 'admin') {
             const sub = interaction.options.getSubcommand();
+            const adminHandler = new AdminHandler(client, decisionChannelId!);
             switch (sub) {
                 case 'change_meta':
-                    return handleAdminMeta(interaction);
-                case 'add_embed':
-                    return handleAdminEmbed(interaction);
+                    return adminHandler.meta(interaction);
+                case 'change_embed':
+                    return adminHandler.embed(interaction);
             }
         }
 
@@ -460,221 +448,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 });
 
 
-// Function to insert,delete or update embed field
-async function handleAdminEmbed(interaction: ChatInputCommandInteraction) {
 
-    const messageId = interaction.options.getString('message_id', true);
-    const method = interaction.options.getString('method', true);
-    const field = interaction.options.getString('field', true);
-    const value = interaction.options.getString('value', true);
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    // 2) fetch the decision message
-    let channel = await client.channels.fetch(decisionChannelId!) as TextChannel | null;
-    if (!channel) {
-        return interaction.editReply('⚠️ Kunne ikke finde #decisions-kanalen.');
-    }
-
-    let msg;
-    try {
-        msg = await channel.messages.fetch(messageId);
-    } catch {
-        return interaction.editReply(`⚠️ Kunne ikke finde besked med ID \`${messageId}\`.`);
-    }
-
-    const oldEmbed = msg.embeds[0];
-    if (!oldEmbed) {
-        return interaction.editReply('⚠️ Den målrettede besked indeholder ingen embeds.');
-    }
-
-    // Check method
-    if (!['insert', 'update', 'delete'].includes(method)) {
-        return interaction.editReply('⚠️ Ugyldig metode. Brug `insert`, `update` eller `delete`.');
-    }
-
-    const fields = [...oldEmbed.fields];
-
-    if ( method === 'delete') {
-
-        const index = fields.findIndex(f => f.name === field);
-
-        if (index === -1) {
-            return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i embed.`);
-        }
-
-        fields.splice(index, 1);
-
-        // convert the old embed into a new builder, swapping in our updated fields
-        const api = oldEmbed.toJSON();
-        api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-        const newEmbed = new EmbedBuilder(api);
-
-        await msg.edit({ embeds: [newEmbed] });
-
-        await interaction.editReply(`✅ Fjernet \`${field}\` fra beslutning ${messageId}.`);
-    } else if (method === 'update') {
-        const index = fields.findIndex(f => f.name === field);
-
-        if (index === -1) {
-            return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i embed.`);
-        }
-        fields[index].value = value;
-        // convert the old embed into a new builder, swapping in our updated fields
-        const api = oldEmbed.toJSON();
-        api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-        const newEmbed = new EmbedBuilder(api);
-        await msg.edit({ embeds: [newEmbed] });
-        await interaction.editReply(`✅ Opdateret \`${field}\` i beslutning ${messageId}.`);
-
-    } else if (method === 'insert') {
-
-        const newField: APIEmbedField = {
-            name: field,
-            value: value,
-            inline: false,
-        };
-
-        fields.push(newField);
-        // convert the old embed into a new builder, swapping in our updated fields
-        const api = oldEmbed.toJSON();
-        api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-        const newEmbed = new EmbedBuilder(api);
-
-        await msg.edit({ embeds: [newEmbed] });
-        await interaction.editReply(`✅ Tilføjet \`${field}\` til beslutning ${messageId}.`);
-    }
-}
-
-/**
- * Handle admin change meta command
- * @param interaction
- * @returns
- */
-async function handleAdminMeta(interaction: ChatInputCommandInteraction) {
-
-    const messageId = interaction.options.getString('message_id', true);
-    const method = interaction.options.getString('method', true);
-    const field = interaction.options.getString('field', true);
-    const value = interaction.options.getString('value', true);
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    let channel = await client.channels.fetch(decisionChannelId!) as TextChannel | null;
-    if (!channel) {
-        return interaction.editReply('⚠️ Kunne ikke finde #decisions-kanalen.');
-    }
-
-    let msg;
-    try {
-        msg = await channel.messages.fetch(messageId);
-    } catch {
-        return interaction.editReply(`⚠️ Kunne ikke finde besked med ID \`${messageId}\`.`);
-    }
-
-    const oldEmbed = msg.embeds[0];
-    if (!oldEmbed) {
-        return interaction.editReply('⚠️ Den målrettede besked indeholder ingen embeds.');
-    }
-
-    // Check method
-    if (!['insert', 'update', 'delete'].includes(method)) {
-        return interaction.editReply('⚠️ Ugyldig metode. Brug `insert`, `update` eller `delete`.');
-    }
-
-    const fields = [...oldEmbed.fields];
-    const metaIndex = fields.findIndex(f => f.name === 'meta_data');
-    if (metaIndex < 0) {
-        return interaction.editReply('⚠️ Embed mangler et `meta_data`-felt.');
-    }
-
-    let meta: DecisionMeta;
-    try {
-        meta = JSON.parse(fields[metaIndex].value) as DecisionMeta;
-    } catch {
-        return interaction.editReply('⚠️ Kunne ikke læse `meta_data` (ugyldig JSON).');
-    }
-
-    // Check method delete
-    if (method === 'delete') {
-
-        try {
-            // If deleting, ensure the field exists
-            if ((meta as any)[field] === undefined) {
-                return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i \`meta_data\`.`);
-            }
-
-            delete (meta as any)[field];
-
-            fields[metaIndex].value = JSON.stringify(meta);
-            // convert the old embed into a new builder, swapping in our updated fields
-            const api = oldEmbed.toJSON();
-            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-            const newEmbed = new EmbedBuilder(api);
-            await msg.edit({ embeds: [newEmbed] });
-            await interaction.editReply(`✅ Fjernet \`${field}\` fra \`meta_data\` for beslutning ${messageId}.`);
-        } catch (err) {
-            logger.error('Error deleting field from meta_data', err);
-            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
-            return interaction.editReply(`⚠️ Fejl under sletning af felt \`${field}\`: ${errorMsg}`);
-        }
-
-    } else if (method === 'insert') {
-
-        try {
-            // If inserting, ensure the field is not already present
-            if ((meta as any)[field] !== undefined && (meta as any)[field] !== null && (meta as any)[field] !== '') {
-                logger.warn({meta}, `Field ${field} already exists in meta_data for message ${messageId}`);
-                return interaction.editReply(`⚠️ Felt \`${field}\` findes allerede i \`meta_data\`.`);
-            }
-
-            // Insert field into meta_data
-            (meta as any)[field] = value;
-            // Update the meta_data field in the embed
-            fields[metaIndex].value = JSON.stringify(meta);
-
-            // convert the old embed into a new builder, swapping in our updated fields
-            const api = oldEmbed.toJSON();
-            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-            const newEmbed = new EmbedBuilder(api);
-
-            await msg.edit({ embeds: [newEmbed] });
-            await interaction.editReply(`✅ Indsat \`${field}\` i \`meta_data\` for beslutning ${messageId}.`);
-        } catch (err) {
-            logger.error('Error inserting field into meta_data', err);
-            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
-            return interaction.editReply(`⚠️ Fejl under indsættelse af felt \`${field}\`: ${errorMsg}`);
-        }
-
-    } else if (method === 'update') {
-
-        try {
-            // If updating, ensure the field exists
-            if ((meta as any)[field] === undefined || (meta as any)[field] === null || (meta as any)[field] === '') {
-                return interaction.editReply(`⚠️ Felt \`${field}\` findes ikke i \`meta_data\`.`);
-            }
-
-            // Update the field in meta_data
-            (meta as any)[field] = value;
-            fields[metaIndex].value = JSON.stringify(meta);
-            // convert the old embed into a new builder, swapping in our updated fields
-            const api = oldEmbed.toJSON();
-            api.fields = fields.map(f => ({ name: f.name, value: f.value, inline: f.inline }));
-            const newEmbed = new EmbedBuilder(api);
-            await msg.edit({ embeds: [newEmbed] });
-            await interaction.editReply(`✅ Opdateret \`${field}\` i \`meta_data\` for beslutning ${messageId}.`);
-        } catch (err) {
-            logger.error('Error updating field in meta_data', err);
-            const errorMsg = typeof err === 'object' && err !== null && 'message' in err ? (err as { message: string }).message : String(err);
-            return interaction.editReply(`⚠️ Fejl under opdatering af felt \`${field}\`: ${errorMsg}`);
-        }
-
-    }
-
-    return;
-
-
-}
 
 async function handleAskKunja(interaction: ChatInputCommandInteraction) {
 
@@ -758,17 +532,19 @@ async function getMessagesAsArchive(channelId: string): Promise<string[]> {
 }
 
 async function handleChangeMembers(i: ChatInputCommandInteraction) {
-    const circleSlug = channelToCircle(i.channelId);
-    if (!circleSlug) {
+
+    const circleName = backlogChannelToCircle(i.channelId);
+
+    if (!circleName) {
         return i.reply({ content: '⚠️ Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
     }
-    const meeting = getMeeting(circleSlug);
+    const meeting = getMeeting(circleName);
     if (!meeting) {
         return i.reply({ content: '🚫 Ingen igangværende møde at ændre deltagere på.', flags: MessageFlags.Ephemeral });
     }
 
     const picker = new UserSelectMenuBuilder()
-        .setCustomId(`updateParticipants|${circleSlug}`)
+        .setCustomId(`updateParticipants|${circleName}`)
         .setPlaceholder('Vælg nye mødedeltagere…')
         .setMinValues(1)
         .setMaxValues(12);
@@ -785,10 +561,10 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu()) return;
     if (!interaction.customId.startsWith('updateParticipants|')) return;
 
-    const [, circleSlug] = interaction.customId.split('|');
+    const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    const meeting = getMeeting(circleSlug);
+    const meeting = getMeeting(circleName);
     if (!meeting) {
         return interaction.reply({
             content: '🚫 Ingen igangværende møde at ændre deltagere på.',
@@ -797,7 +573,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // Update the stored meeting participants and reset the timer if you like
-    meetings[circleSlug] = {
+    meetings[circleName] = {
         participants: ids,
         expires: Date.now() + MEETING_DURATION_MS,
     };
@@ -810,13 +586,13 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 async function handleStart(i: ChatInputCommandInteraction) {
-    const circleSlug = channelToCircle(i.channelId);
-    if (!circleSlug) {
+    const circleName = backlogChannelToCircle(i.channelId);
+    if (!circleName) {
         return i.reply({ content: '⚠️  Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
     }
 
     const picker = new UserSelectMenuBuilder()
-        .setCustomId(`pickParticipants|${circleSlug}`)
+        .setCustomId(`pickParticipants|${circleName}`)
         .setPlaceholder('Vælg mødedeltagere…')
         .setMinValues(1)
         .setMaxValues(12);
@@ -990,8 +766,8 @@ async function handleCircleList(i: ChatInputCommandInteraction) {
 }
 
 async function handleNew(interaction: ChatInputCommandInteraction) {
-    const circleSlug = channelToCircle(interaction.channelId);
-    if (!circleSlug) {
+    const circleName = backlogChannelToCircle(interaction.channelId);
+    if (!circleName) {
         await interaction.reply({
             content: `⚠️  This command only works inside a backlog channel (circles: ${Object.keys(circles).join(', ')}).`,
             flags: MessageFlags.Ephemeral,
@@ -999,7 +775,7 @@ async function handleNew(interaction: ChatInputCommandInteraction) {
         return;
     }
 
-    const circleCfg = circles[circleSlug];
+    const circleCfg = circles[circleName];
     if (!memberHasAnyRole(interaction, circleCfg.writerRoleIds)) {
         await interaction.reply({
             content: '🚫 Du har kun læse-adgang til denne cirkel. Kontakt en admin for skrivetilladelse.',
@@ -1010,7 +786,7 @@ async function handleNew(interaction: ChatInputCommandInteraction) {
 
     const agendaType = interaction.options.getString('type', true);
 
-    const modal = new ModalBuilder().setTitle(`Nyt mødepunkt til ${circleSlug}`).setCustomId(`backlogModal|${circleSlug}|${agendaType}`);
+    const modal = new ModalBuilder().setTitle(`Nyt mødepunkt til ${circleName}`).setCustomId(`backlogModal|${circleName}|${agendaType}`);
 
     const headline = new TextInputBuilder()
         .setCustomId('headline')
@@ -1040,10 +816,23 @@ async function handleNew(interaction: ChatInputCommandInteraction) {
 client.on('interactionCreate', async (interaction: Interaction) => {
     if (!interaction.isModalSubmit()) return;
 
-    const [prefix, circleSlug, agendaType] = interaction.customId.split('|');
+    const [prefix, circleName, agendaType] = interaction.customId.split('|');
     if (prefix !== 'backlogModal') return;
 
-    const circleCfg = circles[circleSlug];
+    logger.info({ prefix, agendaType, circleName }, 'Handling backlog modal submission');
+
+    // Check if the modal is being used in a backlog channel
+    if (backlogChannelToCircle(interaction.channelId || '') !== circleName) {
+        await interaction.reply({ content: '⚠️  This modal can only be used in a backlog channel.', flags: MessageFlags.Ephemeral });
+        return;
+    }
+
+    if (!circleName) {
+        await interaction.reply({ content: '⚠️  This modal can only be used in a backlog channel.', flags: MessageFlags.Ephemeral });
+        return;
+    }
+    const circleCfg = circles[circleName];
+
     if (!circleCfg) {
         await interaction.reply({ content: '⚠️  Unknown circle in modal.', flags: MessageFlags.Ephemeral });
         return;
@@ -1057,16 +846,15 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
     const headline = interaction.fields.getTextInputValue('headline');
     const agenda = interaction.fields.getTextInputValue('agenda');
-    const color = colorMap[circleSlug] || 0x95a5a6; // default gray if not found
 
     const embed = new EmbedBuilder()
         .setTitle('Nyt punkt til husmøde')
-        .setColor(color)
+        .setColor(circleCfg.embedColor)
         .setTimestamp(new Date())
         .setAuthor({ name: interaction.member?.user.username ?? 'Anon' })
         .setThumbnail(interaction.user.displayAvatarURL() ?? '')
         .addFields(
-            { name: 'Cirkel', value: circleSlug, inline: true },
+            { name: 'Cirkel', value: circleName, inline: true },
             { name: 'Forfatter', value: `<@${interaction.user.id}>`, inline: true },
             { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
             { name: 'Overskrift', value: headline, inline: false },
@@ -1082,17 +870,17 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
     const msg = await channel.send({ embeds: [embed], components: [row] });
     await interaction.reply({ content: `Piv! Dit mødepunkt er gemt i <#${circleCfg.backlogChannelId}>`, flags: MessageFlags.Ephemeral });
-    logger.info({ id: msg.id, circle: circleSlug }, '📌 New backlog item posted');
+    logger.info({ id: msg.id, circle: circleName }, '📌 New backlog item posted');
 });
 
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu() || !interaction.customId.startsWith('pickParticipants|'))
         return;
 
-    const [, circleSlug] = interaction.customId.split('|');
+    const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    meetings[circleSlug] = {
+    meetings[circleName] = {
         participants: ids,
         expires: Date.now() + MEETING_DURATION_MS,
     };
@@ -1108,7 +896,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isModalSubmit() || !interaction.customId.startsWith('meetingOutcomeModal|'))
         return;
 
-    const [, circleSlug, backlogMsgId, rawParticipants] = interaction.customId.split('|');
+    const [, circleName, backlogMsgId, rawParticipants] = interaction.customId.split('|');
     const participantIds = rawParticipants.split(',');
 
     const udfald = interaction.fields.getTextInputValue('udfald');
@@ -1117,9 +905,14 @@ client.on('interactionCreate', async (interaction) => {
     const nextDate = interaction.fields.getTextInputValue('opfoelgningsDato');
     const assist = interaction.fields.getTextInputValue('assist').toLowerCase() === 'ja';
 
-    // 2) Fetch original backlog embed to get its title+description
-    const circleCfg = circles[circleSlug];
-    logger.info({ circleCfg, backlogMsgId }, 'Kunja: Fetching original backlog embed');
+    const circleCfg = circles[circleName];
+
+    if (!circleCfg) {
+        await interaction.reply({ content: '⚠️  Unknown circle in modal.', flags: MessageFlags.Ephemeral });
+        return;
+    }
+
+    logger.debug({ circleCfg, backlogMsgId }, 'Kunja: Fetching original backlog embed');
     const backlogChannel = await client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
     let originalHeadline = '–';
     let originalDesc = '–';
@@ -1145,10 +938,10 @@ client.on('interactionCreate', async (interaction) => {
 
     const embed = new EmbedBuilder()
         .setTitle(capitalize(agendaType))
-        .setColor(colorMap[circleSlug])
+        .setColor(circleCfg.embedColor || 0x3498db)
         .setTimestamp(new Date())
         .addFields(
-            { name: 'Cirkel', value: circleSlug, inline: true },
+            { name: 'Cirkel', value: circleName, inline: true },
             { name: DECISION_EMBED_AUTHOR, value: authorMention, inline: true },
             { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
             { name: DECISION_EMBED_ORIGINAL_TITLE, value: originalHeadline, inline: false },
@@ -1189,13 +982,13 @@ async function handleButton(inter: ButtonInteraction) {
     if (inter.customId !== 'saveDecision') return;
 
     const embed = inter.message.embeds[0];
-    const circleSlug = embed?.fields.find(f => f.name === 'Circle')?.value;
+    const circleName = embed?.fields.find(f => f.name === 'Cirkel')?.value;
 
-    if (!circleSlug) {
+    if (!circleName) {
         return inter.reply({ content: '⚠️  Mangler cirkel på embed.', flags: MessageFlags.Ephemeral });
     }
 
-    const meeting = getMeeting(circleSlug);
+    const meeting = getMeeting(circleName);
     if (!meeting) {
         // No meeting: ask user to run /start
         return inter.reply({
@@ -1208,7 +1001,7 @@ async function handleButton(inter: ButtonInteraction) {
     const backlogMsgId = inter.message.id;
     const participantCsv = meeting.participants.join(',');
     const modal = new ModalBuilder()
-        .setCustomId(`meetingOutcomeModal|${circleSlug}|${backlogMsgId}|${participantCsv}`)
+        .setCustomId(`meetingOutcomeModal|${circleName}|${backlogMsgId}|${participantCsv}`)
         .setTitle('Møde – Udfald og Opfølgning');
 
     // your four fields (udfald, agendaType, ansvarlig, opfoelgningsDato) …
@@ -1403,7 +1196,115 @@ client.once('ready', async () => {
         }
     }, 1000 * postProcessIntervalSec);
 
+    /**
+    * Periodically check decisions for post_alignment
+    */
+    setInterval(async () => {
+        try {
+
+            logger.info('Checking for decision messages to align…');
+
+            let channel: TextChannel;
+            try {
+                channel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+            } catch (err) {
+                logger.error({ err }, '❌ Could not fetch decision channel');
+                return false;
+            }
+
+            const historyLimitMs = messageHistoryLimitSec * 1000;
+            const searchStamp = Date.now() - historyLimitMs;
+            const snowflake = timestampToSnowflake(searchStamp);
+
+            // Get alle messages the past week using Discords snowflake timestamp
+            // https://discord.com/developers/docs/reference#snowflakes
+            // Fetch messages older than messageHistoryLimitSec
+            let allMessages: Collection<string, Message>;
+            try {
+                allMessages = await channel.messages.fetch({ limit: 100, after: snowflake });
+            } catch (err) {
+                logger.error({ err }, '❌ Could not fetch messages');
+                return false;
+            }
+
+            // Get all messages that has the meta_data field post_alignment = true and post_alignment_time == null
+            const decisionMessages = allMessages.filter(m =>
+                m.embeds.length > 0 &&
+                m.embeds[0].fields.some(f => f.name === 'meta_data') &&
+                (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === true || JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === 'true') &&
+                (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time == '' ||
+                    JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time == null ||
+                    JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time === undefined)
+            );
+
+            logger.info(`Found ${decisionMessages.size} decision messages to check for alignment`);
+
+            for (const msg of Array.from(decisionMessages.values())) {
+                await alignDecisionWithVisionAndHandbook(msg);
+            }
+        } catch (error) {
+            logger.error({ error }, '❌ Failed to set up message handler');
+        }
+    }, 1000 * postProcessIntervalSec);
+
 });
+
+async function alignDecisionWithVisionAndHandbook(msg: Message): Promise<void> {
+
+    const embed = msg.embeds[0];
+    const metaField = embed.fields.find(f => f.name === 'meta_data')!;
+    let meta: any;
+    try {
+        meta = JSON.parse(metaField.value);
+    } catch (err) {
+        logger.warn({ err, msgId: msg.id, raw: metaField.value }, 'Invalid JSON in meta_data');
+        return;
+    }
+
+    // Check post_alignment flag from meta_data
+    if (meta.post_alignment && (meta.post_alignment_time == '' || meta.post_alignment_time == null || meta.post_alignment_time === undefined)) {
+
+        // Get all embed fields name/value pairs to a JSON array
+        const embedFields: APIEmbedField[] = msg.embeds[0].fields.map((f: APIEmbedField) => ({
+            name: f.name,
+            value: f.value,
+        }));
+
+        // Removed the meta_data field from embedFields. AI should not change this.
+        embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
+
+        // Get vision and handbook messages as archives for OpenAI
+        const visionArchive = await getMessagesAsArchive(visionChannelId!);
+        const handbookArchive = await getMessagesAsArchive(handbookChannelId!);
+
+        let alignmentData: DecisionAlignmentData = await alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
+
+        if (alignmentData.should_raise_objection) {
+            // Try/catch to check for raising an objection.
+            try {
+                logger.info({ alignmentData }, `Auto-aligned decision ${msg.id} → ${JSON.stringify(alignmentData)}`);
+                logger.info(`✅ Applied alignment to decision ${msg.id}`);
+            } catch (err) {
+                logger.error({ err, msgId: msg.id }, '❌ Failed to align decision');
+                // Set meta_data to mark as processed
+                meta.post_alignment_error = true;
+                meta.post_alignment_time = new Date().toISOString();
+                metaField.value = JSON.stringify(meta);
+                await msg.edit({ embeds: [embed] });
+            }
+
+        } else {
+            // Set meta_data to mark as processed
+            meta.post_alignment_time = new Date().toISOString();
+            metaField.value = JSON.stringify(meta);
+            await msg.edit({ embeds: [embed] });
+        }
+
+        return;
+    }
+
+    return;
+}
 
 async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean> {
 
@@ -1497,31 +1398,54 @@ setInterval(async () => {
             continue;
         }
 
-        logger.info({ messageId, meta }, `Checking next action date for decision ${messageId}`);
+        logger.debug({ messageId, meta }, `Checking next action date for decision ${messageId}`);
 
         if (!meta.next_action_date || (meta.next_action_date_handled === true || meta.next_action_date_handled === 'true')) {
             // either no date or already done
-            logger.info(`Decision ${messageId} has no next action date or already handled, removing from queue`);
+            logger.debug(`Decision ${messageId} has no next action date or already handled, removing from queue`);
             nextActionQueue.splice(idx, 1);
             continue;
         }
 
-        const due = new Date(meta.next_action_date).getTime();
-        logger.info(`Decision ${messageId} next action date is ${new Date(due).toISOString()} (now: ${new Date(now).toISOString()})`);
-        if (now < due) continue;
+        const due = new Date(meta.next_action_date).getTime()
+        const windowMs = 1000 * 60 * 60 * 24 * postDaysBeforeDueDate
+        const threshold = due - windowMs  // “7 days before due”
 
-        const circleSlug = embed.fields.find(f => f.name === 'Cirkel')?.value || '–';
+        logger.info(
+            `Decision ${messageId} is due at ${new Date(due).toISOString()}, ` +
+            `processing once we pass ${new Date(threshold).toISOString()} ` +
+            `(leeway of ${postDaysBeforeDueDate} days)`
+        )
+
+        if (now < threshold) {
+            logger.debug(`…too far out, skipping until closer to due date.`);
+            continue;
+        }
+
         const headline = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_TITLE)?.value || '–';
         const agenda = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_DESCRIPTION)?.value || '–';
         const agendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
         const authorMention = embed.fields.find(f => f.name === DECISION_EMBED_AUTHOR)?.value || `<@${client.user?.id}>`;
         const outcome = embed.fields.find(f => f.name === DECISION_EMBED_OUTCOME)?.value || '–';
 
+        const circleName = backlogChannelToCircle(backlogChannelId);
+        if (!circleName) {
+            logger.warn(`No circle found for backlog channel ${backlogChannelId}, skipping follow-up`);
+            nextActionQueue.splice(idx, 1);
+            continue;
+        }
+        const circleCfg = circles[circleName];
+        if (!circleCfg) {
+            logger.warn(`No circle config found for ${circleName}, skipping follow-up`);
+            nextActionQueue.splice(idx, 1);
+            continue;
+        }
+
         // 1) Post a new backlog item to the circle's backlog channel
         const backlogChannel = await client.channels.fetch(backlogChannelId) as TextChannel;
         const followUpEmbed = new EmbedBuilder()
             .setTitle('Opfølgningspunkt til husmøde')
-            .setColor(colorMap[circleSlug])
+            .setColor(circleCfg.embedColor || 0x3498db)
             .setTimestamp(new Date())
             // Set bot as author
             .setAuthor({ name: client.user?.username ?? 'Kunja Hasselmus' })
@@ -1529,7 +1453,7 @@ setInterval(async () => {
             .setThumbnail(client.user?.displayAvatarURL() ?? '')
             // Get fields from original embed
             .addFields(
-                { name: 'Cirkel', value: circleSlug, inline: true },
+                { name: 'Cirkel', value: circleName, inline: true },
                 { name: 'Forfatter', value: authorMention, inline: true },
                 { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
                 { name: 'Overskrift', value: headline, inline: false },

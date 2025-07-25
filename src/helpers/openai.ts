@@ -1,7 +1,8 @@
 import OpenAI from 'openai';
 import { Message, EmbedBuilder, APIEmbedField } from 'discord.js';
 import logger from '../logger';
-import { DecisionMeta, NormalizedEmbedData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/DecisionMeta';
+import { DecisionMeta, NormalizedEmbedData, DecisionAlignmentData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/DecisionMeta';
+import { log } from 'console';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -35,6 +36,40 @@ Your tasks:
 6. **Do not** add any other fields or metadata.
 `;
 
+const ALIGNMENT_PROMPT = `
+Here’s the revised system-prompt with your new requirements baked in:
+
+You are a sociocratic facilitator AI for the Kunja community. Your job is to ensure that any group decision aligns with:
+  • The community’s shared vision
+  • The handbook of practices
+  • Earlier decisions made by consent
+
+**Crucially**, recognize that decisions reached by the community through sociocratic consent are considered “correct” expressions of our collective will. If you detect a conflict between a newly proposed decision and the vision or handbook, you should:
+
+  1. Set "should_raise_objection": true.
+  2. Provide a concise (≤100 words) "raised_objection_reason" explaining the conflict.
+  3. **Additionally**, suggest a revision to the vision or handbook (in 1–2 sentences) that would bring them into harmony with this consented decision.
+
+If there is **no** conflict, set:
+  • "should_raise_objection": false
+  • "raised_objection_reason": null
+
+You will receive as user content a JSON string:
+
+{
+  "embedFields": [
+    { "name": "...", "value": "..." },
+    …
+  ]
+}
+
+Return **only** a JSON object with exactly these two keys (plus your brief suggested rewrite when raising an objection). Do **not** modify embedFields or add any extra fields.
+
+**Example when raising an objection & suggesting a rewrite**:
+
+{"should_raise_objection": true, "suggested_revision": "Update handbook section on cost-sharing to allow household-based splits when consented by all members."}
+
+`;
 
 /**
  * Given a list of embed fields, normalize the data using OpenAI's API.
@@ -70,6 +105,54 @@ export async function normalizeEmbedDataWithOpenAI(embedFields: APIEmbedField[])
             embedFields: [],
             post_process_changes: 'No changes made',
             post_processed_error: true, // Indicate there was an error during post-processing
+        };
+    }
+}
+
+export async function alignDecisionWithOpenAI(embedFields: APIEmbedField[], visionArchive: string[], handbookArchive: string[]): Promise<DecisionAlignmentData> {
+    // Parse the embed fields into a JSON string
+    const embedFieldsJSON = JSON.stringify(embedFields);
+    const archives = JSON.stringify({ visionArchive, handbookArchive })
+
+    try {
+
+        logger.info({ ALIGNMENT_PROMPT, embedFieldsJSON, archives }, `Using OpenAI system prompt for decision alignment`);
+        const completion = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            temperature: 0.5,
+            messages: [
+                { role: 'system', content: ALIGNMENT_PROMPT },
+                { role: 'user', content: embedFieldsJSON },
+                { role: 'user', content: archives },
+            ]
+        });
+
+        logger.info({ completion }, `Received OpenAI response for decision alignment`);
+
+        /**
+         * Returns a JSON object with the following structure:
+         * {
+            "should_raise_objection": true,
+            "suggested_revision": "Update handbook section on cost-sharing to allow household-based splits when consented by all members."
+            }
+
+        */
+        const rawReturnMessage = completion.choices[0].message?.content?.trim() ?? '';
+        logger.info({ rawReturnMessage }, `Parsed OpenAI response for decision alignment`);
+
+        // Convert rawReturnMessage to JSON
+        const parsed = JSON.parse(rawReturnMessage);
+
+        return {
+            should_raise_objection: parsed.should_raise_objection || false,
+            suggested_revision: parsed.suggested_revision || undefined
+        };
+
+    } catch (err) {
+        logger.error({ err, embedFields }, 'alignDecisionWithOpenAI: Failed to align decision with OpenAI');
+        return {
+            should_raise_objection: false,
+            suggested_revision: undefined,
         };
     }
 }

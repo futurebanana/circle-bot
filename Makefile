@@ -27,6 +27,7 @@ deploy:
 	git add .
 	git commit -m "Deploying version $(VERSION)"
 	git push heroku main
+	git push origin main
 
 scale:
 	@echo "Scaling up the Heroku app..."

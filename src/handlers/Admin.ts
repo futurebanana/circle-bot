@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, EmbedBuilder, MessageFlags, TextChannel, APIEmbedField } from 'discord.js';
 import logger from '../logger';
-import { DecisionMeta } from '../types/DecisionMeta';
+import { DecisionMeta } from '../types/Decision';
 import { Discord } from './Discord';
 
 /**

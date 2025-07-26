@@ -1,8 +1,8 @@
 import OpenAI from 'openai';
 import { Message, EmbedBuilder, APIEmbedField } from 'discord.js';
 import logger from '../logger';
-import { DecisionMeta, NormalizedEmbedData, DecisionAlignmentData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/DecisionMeta';
-import { SYSTEM_PROMPT, ALIGNMENT_PROMPT } from '../types/prompts';
+import { DecisionMeta, NormalizedEmbedData, DecisionAlignmentData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/Decision';
+import { SYSTEM_PROMPT, ALIGNMENT_PROMPT } from '../types/Prompts';
 
 
 // Class for OpenAI API interaction

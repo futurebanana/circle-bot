@@ -5,7 +5,7 @@ import {
     DECISION_EMBED_NEXT_ACTION_DATE,
     DECISION_EMBED_NEXT_ACTION_DATE_RESPONSIBLE,
     DECISION_EMBED_ORIGINAL_TITLE,
-} from '../types/DecisionMeta';
+} from '../types/Decision';
 import { Discord } from './Discord';
 import { timestampToSnowflake } from '../helpers/snowFlake';
 

@@ -24,7 +24,6 @@ import {
     MessageFlags,
 } from 'discord.js';
 import logger from './logger/index';
-import { OpenAIInteractions } from './helpers/openai';
 import { capitalize } from './helpers/capitalize';
 import {
     DECISION_EMBED_NEXT_ACTION_DATE,
@@ -36,14 +35,15 @@ import {
     DECISION_EMBED_OUTCOME,
     DECISION_EMBED_PARTICIPANTS,
     DECISION_PROMPT,
-    KUNJA_ASK_PROMPT,
     DecisionMeta,
     NormalizedEmbedData,
     DecisionAlignmentData,
-} from './types/DecisionMeta';
-import { CircleConfig } from './types/Circles';
+    CircleConfig,
+} from './types';
 import { timestampToSnowflake } from './helpers/snowFlake';
-import { Admin, Backlog, Help } from './handlers';
+import { Admin, Backlog, Help, Kunja, Decision } from './handlers';
+import { Discord } from './handlers/Discord';
+import { OpenAIInteractions } from './helpers/openai';
 // for config.ts
 import fs from "fs";
 import yaml from "js-yaml";
@@ -101,6 +101,8 @@ const MEETING_DURATION_MS = parseDuration(meetingDurationSec);
 const nextActionQueue: Array<{ messageId: string; backlogChannelId: string }> = [];
 
 function getMeeting(circle: string): MeetingState | undefined {
+    // Log amount of meetings started
+    logger.info({ circle, meetingsCount: Object.keys(meetings).length }, 'Checking meeting state for circle');
     const m = meetings[circle];
     if (m && m.expires > Date.now()) return m;
     delete meetings[circle];
@@ -158,15 +160,21 @@ function memberHasAnyRole(
 // ────────────────────────────────────────────────────────────────────────────
 // External clients
 // ────────────────────────────────────────────────────────────────────────────
-const openai = new OpenAIInteractions(openaiKey!);
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-    ]
-});
+Discord.init(
+    new Client({
+        intents: [
+            GatewayIntentBits.Guilds,
+            GatewayIntentBits.GuildMembers,
+            GatewayIntentBits.GuildMessages,
+            GatewayIntentBits.MessageContent,
+        ]
+    }),
+    decisionChannelId,
+    visionChannelId,
+    handbookChannelId,
+    new OpenAIInteractions(openaiKey!)
+);
+// ────────────────────────────────────────────────────────────────────────────
 
 // ────────────────────────────────────────────────────────────────────────────
 // Slash‑command registration data
@@ -317,7 +325,7 @@ const commands = [
 // ────────────────────────────────────────────────────────────────────────────
 // Interaction dispatcher
 // ────────────────────────────────────────────────────────────────────────────
-client.on('interactionCreate', async (interaction: Interaction) => {
+Discord.client.on('interactionCreate', async (interaction: Interaction) => {
 
     if (interaction.isChatInputCommand()) {
 
@@ -327,8 +335,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
             const sub = interaction.options.getSubcommand();
             switch (sub) {
                 case 'start':
-                    const meeting = new Meeting(client, decisionChannelId!);
-                    return await meeting.start(interaction);
+                    return handleStart(interaction);
                 case 'deltagere':
                     return handleChangeMembers(interaction);
             }
@@ -338,16 +345,17 @@ client.on('interactionCreate', async (interaction: Interaction) => {
             const sub = interaction.options.getSubcommand();
             switch (sub) {
                 case 'søg':
-                    return handleAsk(interaction);
+                    const decisionHandler = new Decision();
+                    return await decisionHandler.ask(interaction);
                 case 'opfølgning':
-                    const backlog = new Backlog(client, decisionChannelId!);
+                    const backlog = new Backlog();
                     return await backlog.queueList(interaction, messageHistoryLimitSec);
             }
         }
 
         if (commandName === 'admin') {
             const sub = interaction.options.getSubcommand();
-            const adminHandler = new Admin(client, decisionChannelId!);
+            const adminHandler = new Admin();
             switch (sub) {
                 case 'change_meta':
                     return await adminHandler.meta(interaction);
@@ -358,11 +366,12 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
         switch (interaction.commandName) {
             case 'kunja':
-                await handleAskKunja(interaction);
+                const kunja = new Kunja();
+                return await kunja.ask(interaction);
                 break;
             case 'hjælp':
             case 'help':
-                const help = new Help(client, decisionChannelId!);
+                const help = new Help();
                 await help.help(interaction);
                 break;
             case 'ny':
@@ -381,81 +390,6 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         await handleButton(interaction);
     }
 });
-
-
-
-
-async function handleAskKunja(interaction: ChatInputCommandInteraction) {
-
-    const question = interaction.options.getString('spørgsmål', true);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const visionMessages = await getMessagesAsArchive(visionChannelId!);
-    const handbookMessages = await getMessagesAsArchive(handbookChannelId!);
-
-    const texts = [...visionMessages, ...handbookMessages];
-
-    if (texts.length === 0) {
-        await interaction.editReply('No decisions found to search.');
-        return;
-    }
-
-    try {
-        const archive = texts.join('\n\n---\n\n');
-        const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-            { role: 'system', content: KUNJA_ASK_PROMPT },
-            { role: 'user', content: `Archive:\n${archive}` },
-            { role: 'user', content: question },
-        ];
-
-        logger.info({ question, chars: archive.length }, '🤖 Sending Vision/Handbook question to OpenAI');
-        await interaction.editReply(await openai.chat(messages, 0.2, 500));
-    } catch (err: any) {
-        logger.error('OpenAI error', err);
-        await interaction.editReply(`OpenAI error: ${err.message ?? err}`);
-    }
-}
-
-// Function to extract archive messages
-async function getMessagesAsArchive(channelId: string): Promise<string[]> {
-
-    const channel = (await client.channels.fetch(channelId!)) as TextChannel | null;
-    if (!channel) {
-        throw new Error('Channel not found');
-    }
-
-    const texts: string[] = [];
-    let lastId: string | undefined;
-    const charBudget = 64_000;
-
-    // Go through handbook channel messages
-    while (texts.join('\n').length < charBudget) {
-        const batch = await channel.messages.fetch({ limit: 100, before: lastId });
-        if (batch.size === 0) break;
-
-        const sorted = Array.from(batch.values()).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-
-        for (const msg of sorted) {
-            if (msg.embeds.length) {
-                for (const e of msg.embeds) {
-                    const parts: string[] = [];
-                    if (e.title) parts.push(`**${e.title}**`);
-                    for (const field of e.fields) {
-                        if (field.name.toLowerCase() !== 'meta_data') parts.push(`${field.name}: ${field.value}`);
-                    }
-                    texts.push(parts.join('\n'));
-                }
-            } else if (msg.content) {
-                texts.push(msg.content);
-            }
-        }
-
-        lastId = batch.last()?.id;
-        if (batch.size < 100) break;
-    }
-
-    return texts;
-}
 
 async function handleChangeMembers(i: ChatInputCommandInteraction) {
 
@@ -483,7 +417,7 @@ async function handleChangeMembers(i: ChatInputCommandInteraction) {
     });
 }
 
-client.on('interactionCreate', async (interaction) => {
+Discord.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu()) return;
     if (!interaction.customId.startsWith('updateParticipants|')) return;
 
@@ -511,68 +445,7 @@ client.on('interactionCreate', async (interaction) => {
     });
 });
 
-// ────────────────────────────────────────────────────────────────────────────
-// /ask implementation
-// ────────────────────────────────────────────────────────────────────────────
-async function handleAsk(interaction: ChatInputCommandInteraction) {
-    const question = interaction.options.getString('spørgsmål', true);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const channel = (await client.channels.fetch(decisionChannelId!)) as TextChannel | null;
-    if (!channel) {
-        await interaction.editReply('⚠️  Could not access the #decisions channel.');
-        return;
-    }
-
-    const texts: string[] = [];
-    let lastId: string | undefined;
-    const charBudget = 12_000;
-
-    while (texts.join('\n').length < charBudget) {
-        const batch = await channel.messages.fetch({ limit: 100, before: lastId });
-        if (batch.size === 0) break;
-
-        const sorted = Array.from(batch.values()).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-
-        for (const msg of sorted) {
-            if (msg.embeds.length) {
-                for (const e of msg.embeds) {
-                    const parts: string[] = [];
-                    if (e.title) parts.push(`**${e.title}**`);
-                    for (const field of e.fields) {
-                        if (field.name.toLowerCase() !== 'meta_data') parts.push(`${field.name}: ${field.value}`);
-                    }
-                    texts.push(parts.join('\n'));
-                }
-            } else if (msg.content) {
-                texts.push(msg.content);
-            }
-        }
-
-        lastId = batch.last()?.id;
-        if (batch.size < 100) break;
-    }
-
-    if (texts.length === 0) {
-        await interaction.editReply('No decisions found to search.');
-        return;
-    }
-
-    const archive = texts.join('\n\n---\n\n');
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: DECISION_PROMPT },
-        { role: 'user', content: `Archive:\n${archive}` },
-        { role: 'user', content: question },
-    ];
-
-    try {
-        logger.info({ question, chars: archive.length }, '🤖 Sending question to OpenAI');
-        await interaction.editReply(await openai.chat(messages, 0.2, 500));
-    } catch (err: any) {
-        logger.error('OpenAI error', err);
-        await interaction.editReply(`OpenAI error: ${err.message ?? err}`);
-    }
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // /circles list implementation
@@ -663,7 +536,7 @@ async function handleNew(interaction: ChatInputCommandInteraction) {
     await interaction.showModal(modal);
 }
 
-client.on('interactionCreate', async (interaction: Interaction) => {
+Discord.client.on('interactionCreate', async (interaction: Interaction) => {
     if (!interaction.isModalSubmit()) return;
 
     const [prefix, circleName, agendaType] = interaction.customId.split('|');
@@ -688,7 +561,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         return;
     }
 
-    const channel = (await client.channels.fetch(circleCfg.backlogChannelId)) as TextChannel | null;
+    const channel = (await Discord.client.channels.fetch(circleCfg.backlogChannelId)) as TextChannel | null;
     if (!channel) {
         await interaction.reply({ content: '⚠️  Backlog channel not found.', flags: MessageFlags.Ephemeral });
         return;
@@ -723,7 +596,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     logger.info({ id: msg.id, circle: circleName }, '📌 New backlog item posted');
 });
 
-client.on('interactionCreate', async (interaction) => {
+Discord.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu() || !interaction.customId.startsWith('pickParticipants|'))
         return;
 
@@ -742,7 +615,7 @@ client.on('interactionCreate', async (interaction) => {
     });
 });
 
-client.on('interactionCreate', async (interaction) => {
+Discord.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isModalSubmit() || !interaction.customId.startsWith('meetingOutcomeModal|'))
         return;
 
@@ -763,7 +636,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     logger.debug({ circleCfg, backlogMsgId }, 'Kunja: Fetching original backlog embed');
-    const backlogChannel = await client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
+    const backlogChannel = await Discord.client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
     let originalHeadline = '–';
     let originalDesc = '–';
     try {
@@ -812,7 +685,7 @@ client.on('interactionCreate', async (interaction) => {
         );
 
     // 5) Send & cleanup
-    const decisionsChannel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+    const decisionsChannel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
     await decisionsChannel.send({ embeds: [embed] });
 
     // Delete original backlog message
@@ -824,6 +697,22 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.reply({ content: 'Beslutning gemt og punkt fjernet ✅', flags: MessageFlags.Ephemeral });
 });
+
+async function handleStart(i: ChatInputCommandInteraction) {
+    const circleName = backlogChannelToCircle(i.channelId);
+    if (!circleName) {
+        return i.reply({ content: '⚠️  Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
+    }
+
+    const picker = new UserSelectMenuBuilder()
+        .setCustomId(`pickParticipants|${circleName}`)
+        .setPlaceholder('Vælg mødedeltagere…')
+        .setMinValues(1)
+        .setMaxValues(12);
+
+    const row = new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(picker);
+    await i.reply({ content: 'Hvem deltager i mødet?', components: [row], flags: MessageFlags.Ephemeral });
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Button handler placeholder
@@ -901,15 +790,15 @@ async function handleButton(inter: ButtonInteraction) {
 // ────────────────────────────────────────────────────────────────────────────
 // Once the bot is ready, register (or update) commands
 // ────────────────────────────────────────────────────────────────────────────
-client.once('ready', async () => {
+Discord.client.once('ready', async () => {
 
-    logger.info(`🤖 Logged in as ${client.user?.tag}`);
+    logger.info(`🤖 Logged in as ${Discord.client.user?.tag}`);
     const rest = new REST({ version: '10' }).setToken(token);
 
     try {
         if (testGuildId) {
             await rest.put(
-                Routes.applicationGuildCommands(client.application!.id, testGuildId),
+                Routes.applicationGuildCommands(Discord.client.application!.id, testGuildId),
                 { body: commands }
             );
             logger.info('✅ Guild‑scoped commands registered');
@@ -936,7 +825,7 @@ client.once('ready', async () => {
             logger.info('Checking for decision messages with next_action_date to put in queue');
             let channel: TextChannel;
             try {
-                channel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -1005,7 +894,7 @@ client.once('ready', async () => {
 
             let channel: TextChannel;
             try {
-                channel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -1056,7 +945,7 @@ client.once('ready', async () => {
 
             let channel: TextChannel;
             try {
-                channel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -1124,10 +1013,11 @@ async function alignDecisionWithVisionAndHandbook(msg: Message): Promise<void> {
         embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
 
         // Get vision and handbook messages as archives for OpenAI
-        const visionArchive = await getMessagesAsArchive(visionChannelId!);
-        const handbookArchive = await getMessagesAsArchive(handbookChannelId!);
+        const kunja = new Kunja();
+        const visionArchive = await kunja.getMessagesAsArchive(visionChannelId!);
+        const handbookArchive = await kunja.getMessagesAsArchive(handbookChannelId!);
 
-        let alignmentData: DecisionAlignmentData = await openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
+        let alignmentData: DecisionAlignmentData = await Discord.openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
 
         if (alignmentData.should_raise_objection) {
             // Try/catch to check for raising an objection.
@@ -1180,7 +1070,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
         // Removed the meta_data field from embedFields. AI should not change this.
         embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
 
-        let normalizedEmbedData: NormalizedEmbedData = await openai.normalizeEmbedDataWithOpenAI(embedFields);
+        let normalizedEmbedData: NormalizedEmbedData = await Discord.openai.normalizeEmbedDataWithOpenAI(embedFields);
 
         // Check JSON diff between normalizedEmbedData and original embedFields
         logger.info({ normalizedEmbedData, embedFields }, `Checking if normalization is needed for message ${msg.id}`);
@@ -1188,7 +1078,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
             // Try/catch to apply normalization.
             try {
                 logger.info(`Auto-normalized decision ${msg.id} → ${JSON.stringify(normalizedEmbedData)}`);
-                await openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
+                await Discord.openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
                 logger.info(`✅ Applied normalization to message ${msg.id}`);
             } catch (err) {
                 logger.error({ err, msgId: msg.id }, '❌ Failed to apply normalization');
@@ -1212,7 +1102,7 @@ setInterval(async () => {
     logger.info('Checking next action queue for due decisions…');
     const now = Date.now();
 
-    const decisionsChannel = await client.channels.fetch(decisionChannelId!) as TextChannel;
+    const decisionsChannel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
 
     // drain backwards so splice() is safe
     for (let idx = nextActionQueue.length - 1; idx >= 0; idx--) {
@@ -1275,7 +1165,7 @@ setInterval(async () => {
         const headline = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_TITLE)?.value || '–';
         const agenda = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_DESCRIPTION)?.value || '–';
         const agendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
-        const authorMention = embed.fields.find(f => f.name === DECISION_EMBED_AUTHOR)?.value || `<@${client.user?.id}>`;
+        const authorMention = embed.fields.find(f => f.name === DECISION_EMBED_AUTHOR)?.value || `<@${Discord.client.user?.id}>`;
         const outcome = embed.fields.find(f => f.name === DECISION_EMBED_OUTCOME)?.value || '–';
 
         const circleName = backlogChannelToCircle(backlogChannelId);
@@ -1292,15 +1182,15 @@ setInterval(async () => {
         }
 
         // 1) Post a new backlog item to the circle's backlog channel
-        const backlogChannel = await client.channels.fetch(backlogChannelId) as TextChannel;
+        const backlogChannel = await Discord.client.channels.fetch(backlogChannelId) as TextChannel;
         const followUpEmbed = new EmbedBuilder()
             .setTitle('Opfølgningspunkt til husmøde')
             .setColor(circleCfg.embedColor || 0x3498db)
             .setTimestamp(new Date())
             // Set bot as author
-            .setAuthor({ name: client.user?.username ?? 'Kunja Hasselmus' })
+            .setAuthor({ name: Discord.client.user?.username ?? 'Kunja Hasselmus' })
             .setFooter({ text: 'Automatisk opfølgning på beslutning' })
-            .setThumbnail(client.user?.displayAvatarURL() ?? '')
+            .setThumbnail(Discord.client.user?.displayAvatarURL() ?? '')
             // Get fields from original embed
             .addFields(
                 { name: 'Cirkel', value: circleName, inline: true },
@@ -1340,5 +1230,5 @@ setInterval(async () => {
 }, 1000 * queueNextActionIntervalSec);
 
 // ────────────────────────────────────────────────────────────────────────────
-client.login(token);
+Discord.client.login(token);
 // ────────────────────────────────────────────────────────────────────────────

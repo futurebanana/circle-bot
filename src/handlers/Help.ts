@@ -1,12 +1,11 @@
 import { ChatInputCommandInteraction, MessageFlags } from 'discord.js';
-import { Discord } from './Discord';
-import { backlogChannelToCircle } from '../index';
+import { DiscordHandler } from './Discord';
 
 /**
  * Class for meeting-related functionalities.
  * Handles commands like starting a meeting and picking participants.
  */
-class Help extends Discord {
+class HelpHandler extends DiscordHandler {
 
     public async help(i: ChatInputCommandInteraction) {
 
@@ -61,4 +60,4 @@ Du udfylder titel og beskrivelse, og jeg poster et embed med knappen **“Gem i 
 
 }
 
-export { Help };
+export { HelpHandler };

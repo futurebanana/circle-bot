@@ -41,13 +41,14 @@ import {
     CircleConfig,
 } from './types';
 import { timestampToSnowflake } from './helpers/snowFlake';
-import { Admin, Backlog, Help, Kunja, Decision } from './handlers';
-import { Discord } from './handlers/Discord';
 import { OpenAIInteractions } from './helpers/openai';
+import { CircleHandler, MeetingHandler, AdminHandler, BacklogHandler, HelpHandler, KunjaHandler, DecisionHandler, DiscordHandler } from './handlers';
+
 // for config.ts
 import fs from "fs";
 import yaml from "js-yaml";
 import path from "path";
+import { CircleService } from './services/CircleService';
 
 /**
  * Kunja bot – /hello, /ask, /new, /circles list (multi‑circle backlog) in TypeScript.
@@ -76,6 +77,7 @@ const queueNextActionIntervalSec = parseInt(process.env.QUEUE_NEXT_ACTION_INTERV
 const visionChannelId = process.env.VISION_CHANNEL_ID;
 const handbookChannelId = process.env.HANDBOOK_CHANNEL_ID;
 const postDaysBeforeDueDate = parseInt(process.env.POST_DAYS_BEFORE_DUE_DATE || '7', 10); // default 7 days
+const configFilePath = process.env.CONFIG_FILE_PATH || "../config/circles.yaml";
 
 if (!token) throw new Error('BOT_TOKEN missing in .env');
 if (!openaiKey) throw new Error('OPENAI_API_KEY missing in .env');
@@ -85,40 +87,8 @@ if (!visionChannelId) throw new Error('VISION_CHANNEL_ID missing in .env');
 if (!handbookChannelId) throw new Error('HANDBOOK_CHANNEL_ID missing in .env');
 if (!postDaysBeforeDueDate) throw new Error('POST_DAYS_BEFORE_DUE_DATE missing in .env');
 
-function parseDuration(duration: string): number {
-    const num = parseInt(duration, 10);
-    if (isNaN(num) || num <= 0) {
-        throw new Error(`Invalid meeting duration: ${duration}`);
-    }
-    return num * 1000; // convert seconds to milliseconds
-}
-
-type MeetingState = { participants: string[]; expires: number };
-const meetings: Record<string, MeetingState | undefined> = {};
-const MEETING_DURATION_MS = parseDuration(meetingDurationSec);
-
 // Queue with messages to follow up on when next_action_date is reached
 const nextActionQueue: Array<{ messageId: string; backlogChannelId: string }> = [];
-
-function getMeeting(circle: string): MeetingState | undefined {
-    // Log amount of meetings started
-    logger.info({ circle, meetingsCount: Object.keys(meetings).length }, 'Checking meeting state for circle');
-    const m = meetings[circle];
-    if (m && m.expires > Date.now()) return m;
-    delete meetings[circle];
-    return undefined;
-}
-
-export const circles: Record<string, CircleConfig> = yaml.load(
-    fs.readFileSync(path.resolve(__dirname, process.env.CONFIG_FILE_PATH || "../src/config/circles.yaml"), "utf8")
-) as Record<string, CircleConfig>;
-
-const backlogChannelIds = new Set(Object.values(circles).map(c => c.backlogChannelId));
-
-// Helper: map backlogChannelId → circle name (or undefined)
-export function backlogChannelToCircle(channelId: string): string | undefined {
-    return Object.entries(circles).find(([, cfg]) => cfg.backlogChannelId === channelId)?.[0];
-}
 
 /**
  * Returns true if the invoking member has ANY of the roleIds.
@@ -160,7 +130,7 @@ function memberHasAnyRole(
 // ────────────────────────────────────────────────────────────────────────────
 // External clients
 // ────────────────────────────────────────────────────────────────────────────
-Discord.init(
+DiscordHandler.init(
     new Client({
         intents: [
             GatewayIntentBits.Guilds,
@@ -172,7 +142,8 @@ Discord.init(
     decisionChannelId,
     visionChannelId,
     handbookChannelId,
-    new OpenAIInteractions(openaiKey!)
+    new OpenAIInteractions(openaiKey!),
+    configFilePath,
 );
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -325,7 +296,7 @@ const commands = [
 // ────────────────────────────────────────────────────────────────────────────
 // Interaction dispatcher
 // ────────────────────────────────────────────────────────────────────────────
-Discord.client.on('interactionCreate', async (interaction: Interaction) => {
+DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) => {
 
     if (interaction.isChatInputCommand()) {
 
@@ -337,7 +308,8 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
                 case 'start':
                     return handleStart(interaction);
                 case 'deltagere':
-                    return handleChangeMembers(interaction);
+                    const meetingHandler = new MeetingHandler();
+                    return meetingHandler.changeMembers(interaction);
             }
         }
 
@@ -345,17 +317,17 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
             const sub = interaction.options.getSubcommand();
             switch (sub) {
                 case 'søg':
-                    const decisionHandler = new Decision();
+                    const decisionHandler = new DecisionHandler();
                     return await decisionHandler.ask(interaction);
                 case 'opfølgning':
-                    const backlog = new Backlog();
+                    const backlog = new BacklogHandler();
                     return await backlog.queueList(interaction, messageHistoryLimitSec);
             }
         }
 
         if (commandName === 'admin') {
             const sub = interaction.options.getSubcommand();
-            const adminHandler = new Admin();
+            const adminHandler = new AdminHandler();
             switch (sub) {
                 case 'change_meta':
                     return await adminHandler.meta(interaction);
@@ -366,12 +338,12 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
 
         switch (interaction.commandName) {
             case 'kunja':
-                const kunja = new Kunja();
+                const kunja = new KunjaHandler();
                 return await kunja.ask(interaction);
                 break;
             case 'hjælp':
             case 'help':
-                const help = new Help();
+                const help = new HelpHandler();
                 await help.help(interaction);
                 break;
             case 'ny':
@@ -379,7 +351,8 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
                 break;
             case 'cirkler':
                 if (interaction.options.getSubcommand() === 'vis') {
-                    await handleCircleList(interaction);
+                    const circleHandler = new CircleHandler();
+                    await circleHandler.list(interaction);
                 }
                 break;
 
@@ -391,40 +364,16 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
     }
 });
 
-async function handleChangeMembers(i: ChatInputCommandInteraction) {
 
-    const circleName = backlogChannelToCircle(i.channelId);
 
-    if (!circleName) {
-        return i.reply({ content: '⚠️ Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
-    }
-    const meeting = getMeeting(circleName);
-    if (!meeting) {
-        return i.reply({ content: '🚫 Ingen igangværende møde at ændre deltagere på.', flags: MessageFlags.Ephemeral });
-    }
-
-    const picker = new UserSelectMenuBuilder()
-        .setCustomId(`updateParticipants|${circleName}`)
-        .setPlaceholder('Vælg nye mødedeltagere…')
-        .setMinValues(1)
-        .setMaxValues(12);
-
-    const row = new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(picker);
-    await i.reply({
-        content: 'Hvem skal deltage i det igangværende møde nu?',
-        components: [row],
-        flags: MessageFlags.Ephemeral,
-    });
-}
-
-Discord.client.on('interactionCreate', async (interaction) => {
+DiscordHandler.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu()) return;
     if (!interaction.customId.startsWith('updateParticipants|')) return;
 
     const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    const meeting = getMeeting(circleName);
+    const meeting = MeetingHandler.getMeeting(circleName);
     if (!meeting) {
         return interaction.reply({
             content: '🚫 Ingen igangværende møde at ændre deltagere på.',
@@ -432,11 +381,7 @@ Discord.client.on('interactionCreate', async (interaction) => {
         });
     }
 
-    // Update the stored meeting participants and reset the timer if you like
-    meetings[circleName] = {
-        participants: ids,
-        expires: Date.now() + MEETING_DURATION_MS,
-    };
+    MeetingHandler.setMeeting(circleName, ids);
 
     const mentions = ids.map(id => `<@${id}>`).join(', ');
     await interaction.update({
@@ -447,58 +392,18 @@ Discord.client.on('interactionCreate', async (interaction) => {
 
 
 
-// ────────────────────────────────────────────────────────────────────────────
-// /circles list implementation
-// ────────────────────────────────────────────────────────────────────────────
-async function handleCircleList(i: ChatInputCommandInteraction) {
-    const guild = i.guild;
-    if (!guild) {
-        return i.reply({ content: '⚠️  Command must be used inside a guild.', flags: MessageFlags.Ephemeral });
-    }
-
-    // Make sure role & member caches are fresh
-    await guild.roles.fetch();
-    await guild.members.fetch();
-
-    const blocks: string[] = [];
-
-    for (const [slug, cfg] of Object.entries(circles)) {
-        /* ✏️  Roles (as mentions) */
-        const roleMentions = cfg.writerRoleIds
-            .map(id => guild.roles.cache.get(id))
-            .filter(Boolean)
-            .map(r => `<@&${r!.id}>`)
-            .join(', ') || '—';
-
-        /* 👤  Members who hold ANY of those roles */
-        const writers = guild.members.cache
-            .filter(m => m.roles.cache.hasAny(...cfg.writerRoleIds))
-            .map(m => `${m.user.username} (<@${m.user.id}>)`)     // name + clickable mention
-            .slice(0, 25);                                       // avoid giant walls of text
-
-        const writerLine = writers.length ? writers.join(', ') : '—';
-
-        blocks.push(
-            `• **${slug}** – <#${cfg.backlogChannelId}>\n` +
-            `   ✏️ Roller: ${roleMentions}\n` +
-            `   👤 Medlemmer (${writers.length}): ${writerLine}`,
-        );
-    }
-
-    await i.reply({ content: blocks.join('\n\n'), flags: MessageFlags.Ephemeral });
-}
-
 async function handleNew(interaction: ChatInputCommandInteraction) {
-    const circleName = backlogChannelToCircle(interaction.channelId);
+    const circleService = new CircleService(DiscordHandler.circleConfig);
+    const circleName = circleService.backlogChannelToCircle(interaction.channelId);
     if (!circleName) {
         await interaction.reply({
-            content: `⚠️  This command only works inside a backlog channel (circles: ${Object.keys(circles).join(', ')}).`,
+            content: `⚠️  This command only works inside a backlog channel (circles: ${Object.keys(DiscordHandler.circleConfig).join(', ')}).`,
             flags: MessageFlags.Ephemeral,
         });
         return;
     }
 
-    const circleCfg = circles[circleName];
+    const circleCfg = DiscordHandler.circleConfig[circleName];
     if (!memberHasAnyRole(interaction, circleCfg.writerRoleIds)) {
         await interaction.reply({
             content: '🚫 Du har kun læse-adgang til denne cirkel. Kontakt en admin for skrivetilladelse.',
@@ -536,7 +441,7 @@ async function handleNew(interaction: ChatInputCommandInteraction) {
     await interaction.showModal(modal);
 }
 
-Discord.client.on('interactionCreate', async (interaction: Interaction) => {
+DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) => {
     if (!interaction.isModalSubmit()) return;
 
     const [prefix, circleName, agendaType] = interaction.customId.split('|');
@@ -544,8 +449,9 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
 
     logger.info({ prefix, agendaType, circleName }, 'Handling backlog modal submission');
 
+    const circleService = new CircleService(DiscordHandler.circleConfig);
     // Check if the modal is being used in a backlog channel
-    if (backlogChannelToCircle(interaction.channelId || '') !== circleName) {
+    if (circleService.backlogChannelToCircle(interaction.channelId || '') !== circleName) {
         await interaction.reply({ content: '⚠️  This modal can only be used in a backlog channel.', flags: MessageFlags.Ephemeral });
         return;
     }
@@ -554,14 +460,14 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
         await interaction.reply({ content: '⚠️  This modal can only be used in a backlog channel.', flags: MessageFlags.Ephemeral });
         return;
     }
-    const circleCfg = circles[circleName];
+    const circleCfg = DiscordHandler.circleConfig[circleName];
 
     if (!circleCfg) {
         await interaction.reply({ content: '⚠️  Unknown circle in modal.', flags: MessageFlags.Ephemeral });
         return;
     }
 
-    const channel = (await Discord.client.channels.fetch(circleCfg.backlogChannelId)) as TextChannel | null;
+    const channel = (await DiscordHandler.client.channels.fetch(circleCfg.backlogChannelId)) as TextChannel | null;
     if (!channel) {
         await interaction.reply({ content: '⚠️  Backlog channel not found.', flags: MessageFlags.Ephemeral });
         return;
@@ -596,17 +502,14 @@ Discord.client.on('interactionCreate', async (interaction: Interaction) => {
     logger.info({ id: msg.id, circle: circleName }, '📌 New backlog item posted');
 });
 
-Discord.client.on('interactionCreate', async (interaction) => {
+DiscordHandler.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu() || !interaction.customId.startsWith('pickParticipants|'))
         return;
 
     const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    meetings[circleName] = {
-        participants: ids,
-        expires: Date.now() + MEETING_DURATION_MS,
-    };
+    MeetingHandler.setMeeting(circleName, ids);
 
     const mentions = ids.map(id => `<@${id}>`).join(', ');
     await interaction.update({
@@ -615,7 +518,7 @@ Discord.client.on('interactionCreate', async (interaction) => {
     });
 });
 
-Discord.client.on('interactionCreate', async (interaction) => {
+DiscordHandler.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isModalSubmit() || !interaction.customId.startsWith('meetingOutcomeModal|'))
         return;
 
@@ -628,7 +531,7 @@ Discord.client.on('interactionCreate', async (interaction) => {
     const nextDate = interaction.fields.getTextInputValue('opfoelgningsDato');
     const assist = interaction.fields.getTextInputValue('assist').toLowerCase() === 'ja';
 
-    const circleCfg = circles[circleName];
+    const circleCfg = DiscordHandler.circleConfig[circleName];
 
     if (!circleCfg) {
         await interaction.reply({ content: '⚠️  Unknown circle in modal.', flags: MessageFlags.Ephemeral });
@@ -636,7 +539,7 @@ Discord.client.on('interactionCreate', async (interaction) => {
     }
 
     logger.debug({ circleCfg, backlogMsgId }, 'Kunja: Fetching original backlog embed');
-    const backlogChannel = await Discord.client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
+    const backlogChannel = await DiscordHandler.client.channels.fetch(circleCfg.backlogChannelId) as TextChannel;
     let originalHeadline = '–';
     let originalDesc = '–';
     try {
@@ -685,7 +588,7 @@ Discord.client.on('interactionCreate', async (interaction) => {
         );
 
     // 5) Send & cleanup
-    const decisionsChannel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
+    const decisionsChannel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
     await decisionsChannel.send({ embeds: [embed] });
 
     // Delete original backlog message
@@ -699,7 +602,8 @@ Discord.client.on('interactionCreate', async (interaction) => {
 });
 
 async function handleStart(i: ChatInputCommandInteraction) {
-    const circleName = backlogChannelToCircle(i.channelId);
+    const circleService = new CircleService(DiscordHandler.circleConfig);
+    const circleName = circleService.backlogChannelToCircle(i.channelId);
     if (!circleName) {
         return i.reply({ content: '⚠️  Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
     }
@@ -727,7 +631,7 @@ async function handleButton(inter: ButtonInteraction) {
         return inter.reply({ content: '⚠️  Mangler cirkel på embed.', flags: MessageFlags.Ephemeral });
     }
 
-    const meeting = getMeeting(circleName);
+    const meeting = MeetingHandler.getMeeting(circleName);
     if (!meeting) {
         // No meeting: ask user to run /start
         return inter.reply({
@@ -790,15 +694,15 @@ async function handleButton(inter: ButtonInteraction) {
 // ────────────────────────────────────────────────────────────────────────────
 // Once the bot is ready, register (or update) commands
 // ────────────────────────────────────────────────────────────────────────────
-Discord.client.once('ready', async () => {
+DiscordHandler.client.once('ready', async () => {
 
-    logger.info(`🤖 Logged in as ${Discord.client.user?.tag}`);
+    logger.info(`🤖 Logged in as ${DiscordHandler.client.user?.tag}`);
     const rest = new REST({ version: '10' }).setToken(token);
 
     try {
         if (testGuildId) {
             await rest.put(
-                Routes.applicationGuildCommands(Discord.client.application!.id, testGuildId),
+                Routes.applicationGuildCommands(DiscordHandler.client.application!.id, testGuildId),
                 { body: commands }
             );
             logger.info('✅ Guild‑scoped commands registered');
@@ -825,7 +729,7 @@ Discord.client.once('ready', async () => {
             logger.info('Checking for decision messages with next_action_date to put in queue');
             let channel: TextChannel;
             try {
-                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -894,7 +798,7 @@ Discord.client.once('ready', async () => {
 
             let channel: TextChannel;
             try {
-                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -945,7 +849,7 @@ Discord.client.once('ready', async () => {
 
             let channel: TextChannel;
             try {
-                channel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
+                channel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
             } catch (err) {
                 logger.error({ err }, '❌ Could not fetch decision channel');
                 return false;
@@ -1013,11 +917,11 @@ async function alignDecisionWithVisionAndHandbook(msg: Message): Promise<void> {
         embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
 
         // Get vision and handbook messages as archives for OpenAI
-        const kunja = new Kunja();
+        const kunja = new KunjaHandler();
         const visionArchive = await kunja.getMessagesAsArchive(visionChannelId!);
         const handbookArchive = await kunja.getMessagesAsArchive(handbookChannelId!);
 
-        let alignmentData: DecisionAlignmentData = await Discord.openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
+        let alignmentData: DecisionAlignmentData = await DiscordHandler.openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
 
         if (alignmentData.should_raise_objection) {
             // Try/catch to check for raising an objection.
@@ -1070,7 +974,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
         // Removed the meta_data field from embedFields. AI should not change this.
         embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
 
-        let normalizedEmbedData: NormalizedEmbedData = await Discord.openai.normalizeEmbedDataWithOpenAI(embedFields);
+        let normalizedEmbedData: NormalizedEmbedData = await DiscordHandler.openai.normalizeEmbedDataWithOpenAI(embedFields);
 
         // Check JSON diff between normalizedEmbedData and original embedFields
         logger.info({ normalizedEmbedData, embedFields }, `Checking if normalization is needed for message ${msg.id}`);
@@ -1078,7 +982,7 @@ async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean
             // Try/catch to apply normalization.
             try {
                 logger.info(`Auto-normalized decision ${msg.id} → ${JSON.stringify(normalizedEmbedData)}`);
-                await Discord.openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
+                await DiscordHandler.openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
                 logger.info(`✅ Applied normalization to message ${msg.id}`);
             } catch (err) {
                 logger.error({ err, msgId: msg.id }, '❌ Failed to apply normalization');
@@ -1102,7 +1006,7 @@ setInterval(async () => {
     logger.info('Checking next action queue for due decisions…');
     const now = Date.now();
 
-    const decisionsChannel = await Discord.client.channels.fetch(decisionChannelId!) as TextChannel;
+    const decisionsChannel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
 
     // drain backwards so splice() is safe
     for (let idx = nextActionQueue.length - 1; idx >= 0; idx--) {
@@ -1165,16 +1069,17 @@ setInterval(async () => {
         const headline = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_TITLE)?.value || '–';
         const agenda = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_DESCRIPTION)?.value || '–';
         const agendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
-        const authorMention = embed.fields.find(f => f.name === DECISION_EMBED_AUTHOR)?.value || `<@${Discord.client.user?.id}>`;
+        const authorMention = embed.fields.find(f => f.name === DECISION_EMBED_AUTHOR)?.value || `<@${DiscordHandler.client.user?.id}>`;
         const outcome = embed.fields.find(f => f.name === DECISION_EMBED_OUTCOME)?.value || '–';
 
-        const circleName = backlogChannelToCircle(backlogChannelId);
+        const circleService = new CircleService(DiscordHandler.circleConfig);
+        const circleName = circleService.backlogChannelToCircle(backlogChannelId);
         if (!circleName) {
             logger.warn(`No circle found for backlog channel ${backlogChannelId}, skipping follow-up`);
             nextActionQueue.splice(idx, 1);
             continue;
         }
-        const circleCfg = circles[circleName];
+        const circleCfg = DiscordHandler.circleConfig[circleName];
         if (!circleCfg) {
             logger.warn(`No circle config found for ${circleName}, skipping follow-up`);
             nextActionQueue.splice(idx, 1);
@@ -1182,15 +1087,15 @@ setInterval(async () => {
         }
 
         // 1) Post a new backlog item to the circle's backlog channel
-        const backlogChannel = await Discord.client.channels.fetch(backlogChannelId) as TextChannel;
+        const backlogChannel = await DiscordHandler.client.channels.fetch(backlogChannelId) as TextChannel;
         const followUpEmbed = new EmbedBuilder()
             .setTitle('Opfølgningspunkt til husmøde')
             .setColor(circleCfg.embedColor || 0x3498db)
             .setTimestamp(new Date())
             // Set bot as author
-            .setAuthor({ name: Discord.client.user?.username ?? 'Kunja Hasselmus' })
+            .setAuthor({ name: DiscordHandler.client.user?.username ?? 'Kunja Hasselmus' })
             .setFooter({ text: 'Automatisk opfølgning på beslutning' })
-            .setThumbnail(Discord.client.user?.displayAvatarURL() ?? '')
+            .setThumbnail(DiscordHandler.client.user?.displayAvatarURL() ?? '')
             // Get fields from original embed
             .addFields(
                 { name: 'Cirkel', value: circleName, inline: true },
@@ -1230,5 +1135,5 @@ setInterval(async () => {
 }, 1000 * queueNextActionIntervalSec);
 
 // ────────────────────────────────────────────────────────────────────────────
-Discord.client.login(token);
+DiscordHandler.client.login(token);
 // ────────────────────────────────────────────────────────────────────────────

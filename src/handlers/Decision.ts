@@ -1,15 +1,15 @@
 import { ChatInputCommandInteraction, MessageFlags, TextChannel } from 'discord.js';
-import { Discord } from './Discord';
+import { DiscordHandler } from './Discord';
 import { DECISION_PROMPT } from '../types';
 import logger from '../logger';
 
-class Decision extends Discord {
+class DecisionHandler extends DiscordHandler {
 
     public async ask(interaction: ChatInputCommandInteraction) {
         const question = interaction.options.getString('spørgsmål', true);
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const channel = (await Discord.client.channels.fetch(this.decisionChannelId!)) as TextChannel | null;
+        const channel = (await DiscordHandler.client.channels.fetch(this.decisionChannelId!)) as TextChannel | null;
         if (!channel) {
             await interaction.editReply('⚠️  Could not access the #decisions channel.');
             return;
@@ -67,4 +67,4 @@ class Decision extends Discord {
 
 }
 
-export { Decision };
+export { DecisionHandler };

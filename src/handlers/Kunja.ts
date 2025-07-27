@@ -1,9 +1,9 @@
 import { ChatInputCommandInteraction, MessageFlags, TextChannel } from 'discord.js';
-import { Discord } from './Discord';
+import { DiscordHandler } from './Discord';
 import logger from '../logger';
 import { KUNJA_ASK_PROMPT } from '../types/Decision';
 
-class Kunja extends Discord {
+class KunjaHandler extends DiscordHandler {
 
     // Function to handle Kunja specific logic
     public async ask(interaction: ChatInputCommandInteraction) {
@@ -79,4 +79,4 @@ class Kunja extends Discord {
 
 }
 
-export { Kunja };
+export { KunjaHandler };

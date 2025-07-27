@@ -6,7 +6,7 @@ import {
     DECISION_EMBED_NEXT_ACTION_DATE_RESPONSIBLE,
     DECISION_EMBED_ORIGINAL_TITLE,
 } from '../types/Decision';
-import { Discord } from './Discord';
+import { DiscordHandler } from './Discord';
 import { timestampToSnowflake } from '../helpers/snowFlake';
 
 /**
@@ -14,7 +14,7 @@ import { timestampToSnowflake } from '../helpers/snowFlake';
  * Handles commands like changing meta data and adding embeds.
  */
 
-class Backlog extends Discord {
+class BacklogHandler extends DiscordHandler {
 
     /**
      *
@@ -81,5 +81,5 @@ class Backlog extends Discord {
 }
 
 export {
-    Backlog
+    BacklogHandler
 };

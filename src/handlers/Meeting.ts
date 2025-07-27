@@ -1,9 +1,8 @@
 import { DiscordHandler } from "./Discord";
 import { ChatInputCommandInteraction, MessageFlags, ActionRowBuilder, UserSelectMenuBuilder } from "discord.js";
 import { MeetingState } from "../types/Meeting";
-import { MeetingService } from "../services/MeetingService";
+import { MeetingService, CircleService } from "../services";
 import logger from "../logger";
-import { CircleService } from "../services/CircleService";
 
 /**
  * Class for handling meeting-related functionalities.

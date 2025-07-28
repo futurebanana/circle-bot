@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npx ts-node-dev --respawn src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 0",
-    "build": "tsc && cp src/config.yaml build/config.yaml",
+    "build": "tsc && mkdir build/config && cp -R src/config/circles.yaml build/config/circles.yaml",
     "start": "NODE_ENV=production node build/index.js"
   },
   "repository": {

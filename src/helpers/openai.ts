@@ -4,7 +4,6 @@ import logger from '../logger';
 import { DecisionMeta, NormalizedEmbedData, DecisionAlignmentData, DECISION_EMBED_NEXT_ACTION_DATE } from '../types/Decision';
 import { SYSTEM_PROMPT, ALIGNMENT_PROMPT } from '../types/Prompts';
 
-
 // Class for OpenAI API interaction
 class OpenAIInteractions {
 

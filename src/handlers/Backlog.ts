@@ -1,5 +1,17 @@
 
-import { ChatInputCommandInteraction, EmbedBuilder, MessageFlags, TextChannel, InteractionResponse } from 'discord.js';
+import {
+    ChatInputCommandInteraction,
+    EmbedBuilder,
+    MessageFlags,
+    TextChannel,
+    InteractionResponse,
+    GuildMember,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
+    ActionRowBuilder,
+    ButtonInteraction,
+} from 'discord.js';
 import {
     DecisionMeta,
     DECISION_EMBED_NEXT_ACTION_DATE,
@@ -7,7 +19,11 @@ import {
     DECISION_EMBED_ORIGINAL_TITLE,
 } from '../types/Decision';
 import { DiscordHandler } from './Discord';
+import { DECISION_EMBED_ORIGINAL_AGENDA_TYPE } from '../types/Decision';
+import { MeetingHandler } from './Meeting';
+import { CircleService } from '../services';
 import { timestampToSnowflake } from '../helpers/snowFlake';
+import logger from '../logger';
 
 /**
  * Class for admnin-related functionalities.
@@ -76,6 +92,166 @@ class BacklogHandler extends DiscordHandler {
             ],
             flags: MessageFlags.Ephemeral
         });
+    }
+
+    /**
+     * Returns true if the invoking member has ANY of the roleIds.
+     * Adds verbose logging so you can see what’s happening.
+     */
+    private memberHasAnyRole(interaction: ChatInputCommandInteraction, roleIds: string[]): boolean {
+
+        const member = interaction.member as GuildMember | null;
+
+        if (!member) {
+            logger.warn(
+                {
+                    user: interaction.user.id,
+                    where: interaction.channelId,
+                },
+                'member object is null -- did you enable GUILD_MEMBERS intent?',
+            );
+            return false;
+        }
+
+        const memberRoles = new Set<string>(
+            // .roles is a GuildMemberRoleManager
+            member.roles.cache.map((r) => r.id),
+        );
+
+        logger.info(
+            {
+                user: interaction.user.id,
+                needed: roleIds,
+                has: Array.from(memberRoles),
+            },
+            'Doing role check',
+        );
+
+        return roleIds.some((id) => memberRoles.has(id));
+    }
+
+    public async new(interaction: ChatInputCommandInteraction) {
+
+        const circleService = new CircleService(DiscordHandler.circleConfig);
+        const circleName = circleService.backlogChannelToCircle(interaction.channelId);
+
+        if (!circleName) {
+            await interaction.reply({
+                content: `⚠️  This command only works inside a backlog channel (circles: ${Object.keys(DiscordHandler.circleConfig).join(', ')}).`,
+                flags: MessageFlags.Ephemeral,
+            });
+            return;
+        }
+
+        const circleCfg = DiscordHandler.circleConfig[circleName];
+        if (!this.memberHasAnyRole(interaction, circleCfg.writerRoleIds)) {
+            await interaction.reply({
+                content: '🚫 Du har kun læse-adgang til denne cirkel. Kontakt en admin for skrivetilladelse.',
+                flags: MessageFlags.Ephemeral,
+            });
+            return;
+        }
+
+        const agendaType = interaction.options.getString('type', true);
+
+        const modal = new ModalBuilder().setTitle(`Nyt mødepunkt til ${circleName}`).setCustomId(`backlogModal|${circleName}|${agendaType}`);
+
+        const headline = new TextInputBuilder()
+            .setCustomId('headline')
+            .setLabel('Overskrift')
+            .setPlaceholder('Kort titel…')
+            .setMinLength(5)
+            .setRequired(true)
+            .setStyle(TextInputStyle.Short);
+
+        const agenda = new TextInputBuilder()
+            .setCustomId('agenda')
+            .setLabel('Beskrivelse')
+            .setPlaceholder('Beskriv dit forslag konkret og tydeligt…')
+            .setRequired(true)
+            .setMaxLength(1500)
+            .setMinLength(10)
+            .setStyle(TextInputStyle.Paragraph);
+
+        modal.addComponents(
+            new ActionRowBuilder<TextInputBuilder>().addComponents(headline),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(agenda),
+        );
+
+        await interaction.showModal(modal);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // Button handler placeholder
+    // ────────────────────────────────────────────────────────────────────────────
+    public async save(inter: ButtonInteraction) {
+        if (inter.customId !== 'saveDecision') return;
+
+        const embed = inter.message.embeds[0];
+        const circleName = embed?.fields.find(f => f.name === 'Cirkel')?.value;
+
+        if (!circleName) {
+            return inter.reply({ content: '⚠️  Mangler cirkel på embed.', flags: MessageFlags.Ephemeral });
+        }
+
+        const meeting = MeetingHandler.get(circleName);
+        if (!meeting) {
+            // No meeting: ask user to run /start
+            return inter.reply({
+                content: 'Ingen møde i gang – kør `/møde start` for at starte et nyt møde.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+
+        // Meeting is running → show outcome-modal immediately
+        const backlogMsgId = inter.message.id;
+        const participantCsv = meeting.participants.join(',');
+        const modal = new ModalBuilder()
+            .setCustomId(`meetingOutcomeModal|${circleName}|${backlogMsgId}|${participantCsv}`)
+            .setTitle('Møde – Udfald og Opfølgning');
+
+        // your four fields (udfald, agendaType, ansvarlig, opfoelgningsDato) …
+        const udfaldInput = new TextInputBuilder()
+            .setCustomId('udfald')
+            .setLabel('Udfald')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true);
+
+        // get original agendaType and prefill it
+        const originalAgendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
+        const agendaTypeInput = new TextInputBuilder()
+            .setCustomId('agendaType')
+            .setLabel('Agenda-type')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setValue(originalAgendaType);
+        const ansvarligInput = new TextInputBuilder()
+            .setCustomId('ansvarlig')
+            .setLabel('Ansvarlig (valgfri)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false);
+        const opfoelgningsDatumInput = new TextInputBuilder()
+            .setCustomId('opfoelgningsDato')
+            .setLabel('Næste opfølgningsdato (valgfri)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false);
+        const assistInput = new TextInputBuilder()
+            .setCustomId('assist')
+            .setLabel('Lad botten hjælpe (ja/nej)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('ja eller nej—lad stå tomt for nej')
+            .setValue('ja')
+            .setRequired(false);
+
+        modal.addComponents(
+            new ActionRowBuilder<TextInputBuilder>().addComponents(udfaldInput),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(agendaTypeInput),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(ansvarligInput),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(opfoelgningsDatumInput),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(assistInput),
+        );
+
+        await inter.showModal(modal);
     }
 
 }

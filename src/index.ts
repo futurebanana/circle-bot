@@ -2,25 +2,17 @@ import 'dotenv/config';
 import {
     ActionRowBuilder,
     ButtonBuilder,
-    ButtonInteraction,
     ButtonStyle,
-    ChatInputCommandInteraction,
     Client,
     EmbedBuilder,
     GatewayIntentBits,
     Interaction,
-    ModalBuilder,
     REST,
     Routes,
     SlashCommandBuilder,
     TextChannel,
-    TextInputBuilder,
-    TextInputStyle,
-    GuildMember,
-    UserSelectMenuBuilder,
     Message,
     Collection,
-    APIEmbedField,
     MessageFlags,
 } from 'discord.js';
 import logger from './logger/index';
@@ -34,21 +26,12 @@ import {
     DECISION_EMBED_ORIGINAL_DESCRIPTION,
     DECISION_EMBED_OUTCOME,
     DECISION_EMBED_PARTICIPANTS,
-    DECISION_PROMPT,
     DecisionMeta,
-    NormalizedEmbedData,
-    DecisionAlignmentData,
-    CircleConfig,
 } from './types';
 import { timestampToSnowflake } from './helpers/snowFlake';
 import { OpenAIInteractions } from './helpers/openai';
 import { CircleHandler, MeetingHandler, AdminHandler, BacklogHandler, HelpHandler, KunjaHandler, DecisionHandler, DiscordHandler } from './handlers';
-
-// for config.ts
-import fs from "fs";
-import yaml from "js-yaml";
-import path from "path";
-import { CircleService } from './services/CircleService';
+import { CircleService, DecisionService } from './services';
 
 /**
  * Kunja bot – /hello, /ask, /new, /circles list (multi‑circle backlog) in TypeScript.
@@ -89,43 +72,6 @@ if (!postDaysBeforeDueDate) throw new Error('POST_DAYS_BEFORE_DUE_DATE missing i
 
 // Queue with messages to follow up on when next_action_date is reached
 const nextActionQueue: Array<{ messageId: string; backlogChannelId: string }> = [];
-
-/**
- * Returns true if the invoking member has ANY of the roleIds.
- * Adds verbose logging so you can see what’s happening.
- */
-function memberHasAnyRole(
-    interaction: ChatInputCommandInteraction,
-    roleIds: string[],
-): boolean {
-    const member = interaction.member as GuildMember | null;
-    if (!member) {
-        logger.warn(
-            {
-                user: interaction.user.id,
-                where: interaction.channelId,
-            },
-            'member object is null -- did you enable GUILD_MEMBERS intent?',
-        );
-        return false;
-    }
-
-    const memberRoles = new Set<string>(
-        // .roles is a GuildMemberRoleManager
-        member.roles.cache.map((r) => r.id),
-    );
-
-    logger.info(
-        {
-            user: interaction.user.id,
-            needed: roleIds,
-            has: Array.from(memberRoles),
-        },
-        'Doing role check',
-    );
-
-    return roleIds.some((id) => memberRoles.has(id));
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // External clients
@@ -304,11 +250,11 @@ DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) =
 
         if (commandName === 'møde') {
             const sub = interaction.options.getSubcommand();
+            const meetingHandler = new MeetingHandler();
             switch (sub) {
                 case 'start':
-                    return handleStart(interaction);
+                    return meetingHandler.start(interaction);
                 case 'deltagere':
-                    const meetingHandler = new MeetingHandler();
                     return meetingHandler.changeMembers(interaction);
             }
         }
@@ -347,7 +293,8 @@ DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) =
                 await help.help(interaction);
                 break;
             case 'ny':
-                await handleNew(interaction);
+                const backlogHandler = new BacklogHandler();
+                await backlogHandler.new(interaction);
                 break;
             case 'cirkler':
                 if (interaction.options.getSubcommand() === 'vis') {
@@ -360,11 +307,10 @@ DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) =
     }
 
     if (interaction.isButton()) {
-        await handleButton(interaction);
+        const backlogHandler = new BacklogHandler();
+        await backlogHandler.save(interaction);
     }
 });
-
-
 
 DiscordHandler.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isUserSelectMenu()) return;
@@ -373,7 +319,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    const meeting = MeetingHandler.getMeeting(circleName);
+    const meeting = MeetingHandler.get(circleName);
     if (!meeting) {
         return interaction.reply({
             content: '🚫 Ingen igangværende møde at ændre deltagere på.',
@@ -381,7 +327,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
         });
     }
 
-    MeetingHandler.setMeeting(circleName, ids);
+    MeetingHandler.set(circleName, ids);
 
     const mentions = ids.map(id => `<@${id}>`).join(', ');
     await interaction.update({
@@ -389,57 +335,6 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
         components: [],
     });
 });
-
-
-
-async function handleNew(interaction: ChatInputCommandInteraction) {
-    const circleService = new CircleService(DiscordHandler.circleConfig);
-    const circleName = circleService.backlogChannelToCircle(interaction.channelId);
-    if (!circleName) {
-        await interaction.reply({
-            content: `⚠️  This command only works inside a backlog channel (circles: ${Object.keys(DiscordHandler.circleConfig).join(', ')}).`,
-            flags: MessageFlags.Ephemeral,
-        });
-        return;
-    }
-
-    const circleCfg = DiscordHandler.circleConfig[circleName];
-    if (!memberHasAnyRole(interaction, circleCfg.writerRoleIds)) {
-        await interaction.reply({
-            content: '🚫 Du har kun læse-adgang til denne cirkel. Kontakt en admin for skrivetilladelse.',
-            flags: MessageFlags.Ephemeral,
-        });
-        return;
-    }
-
-    const agendaType = interaction.options.getString('type', true);
-
-    const modal = new ModalBuilder().setTitle(`Nyt mødepunkt til ${circleName}`).setCustomId(`backlogModal|${circleName}|${agendaType}`);
-
-    const headline = new TextInputBuilder()
-        .setCustomId('headline')
-        .setLabel('Overskrift')
-        .setPlaceholder('Kort titel…')
-        .setMinLength(5)
-        .setRequired(true)
-        .setStyle(TextInputStyle.Short);
-
-    const agenda = new TextInputBuilder()
-        .setCustomId('agenda')
-        .setLabel('Beskrivelse')
-        .setPlaceholder('Beskriv dit forslag konkret og tydeligt…')
-        .setRequired(true)
-        .setMaxLength(1500)
-        .setMinLength(10)
-        .setStyle(TextInputStyle.Paragraph);
-
-    modal.addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(headline),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(agenda),
-    );
-
-    await interaction.showModal(modal);
-}
 
 DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) => {
     if (!interaction.isModalSubmit()) return;
@@ -509,7 +404,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     const [, circleName] = interaction.customId.split('|');
     const ids = interaction.values as string[];
 
-    MeetingHandler.setMeeting(circleName, ids);
+    MeetingHandler.set(circleName, ids);
 
     const mentions = ids.map(id => `<@${id}>`).join(', ');
     await interaction.update({
@@ -601,96 +496,6 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: 'Beslutning gemt og punkt fjernet ✅', flags: MessageFlags.Ephemeral });
 });
 
-async function handleStart(i: ChatInputCommandInteraction) {
-    const circleService = new CircleService(DiscordHandler.circleConfig);
-    const circleName = circleService.backlogChannelToCircle(i.channelId);
-    if (!circleName) {
-        return i.reply({ content: '⚠️  Denne kommando skal bruges i en backlog-kanal.', flags: MessageFlags.Ephemeral });
-    }
-
-    const picker = new UserSelectMenuBuilder()
-        .setCustomId(`pickParticipants|${circleName}`)
-        .setPlaceholder('Vælg mødedeltagere…')
-        .setMinValues(1)
-        .setMaxValues(12);
-
-    const row = new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(picker);
-    await i.reply({ content: 'Hvem deltager i mødet?', components: [row], flags: MessageFlags.Ephemeral });
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Button handler placeholder
-// ────────────────────────────────────────────────────────────────────────────
-async function handleButton(inter: ButtonInteraction) {
-    if (inter.customId !== 'saveDecision') return;
-
-    const embed = inter.message.embeds[0];
-    const circleName = embed?.fields.find(f => f.name === 'Cirkel')?.value;
-
-    if (!circleName) {
-        return inter.reply({ content: '⚠️  Mangler cirkel på embed.', flags: MessageFlags.Ephemeral });
-    }
-
-    const meeting = MeetingHandler.getMeeting(circleName);
-    if (!meeting) {
-        // No meeting: ask user to run /start
-        return inter.reply({
-            content: 'Ingen møde i gang – kør `/møde start` for at starte et nyt møde.',
-            flags: MessageFlags.Ephemeral,
-        });
-    }
-
-    // Meeting is running → show outcome-modal immediately
-    const backlogMsgId = inter.message.id;
-    const participantCsv = meeting.participants.join(',');
-    const modal = new ModalBuilder()
-        .setCustomId(`meetingOutcomeModal|${circleName}|${backlogMsgId}|${participantCsv}`)
-        .setTitle('Møde – Udfald og Opfølgning');
-
-    // your four fields (udfald, agendaType, ansvarlig, opfoelgningsDato) …
-    const udfaldInput = new TextInputBuilder()
-        .setCustomId('udfald')
-        .setLabel('Udfald')
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true);
-
-    // get original agendaType and prefill it
-    const originalAgendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
-    const agendaTypeInput = new TextInputBuilder()
-        .setCustomId('agendaType')
-        .setLabel('Agenda-type')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setValue(originalAgendaType);
-    const ansvarligInput = new TextInputBuilder()
-        .setCustomId('ansvarlig')
-        .setLabel('Ansvarlig (valgfri)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false);
-    const opfoelgningsDatumInput = new TextInputBuilder()
-        .setCustomId('opfoelgningsDato')
-        .setLabel('Næste opfølgningsdato (valgfri)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false);
-    const assistInput = new TextInputBuilder()
-        .setCustomId('assist')
-        .setLabel('Lad botten hjælpe (ja/nej)')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('ja eller nej—lad stå tomt for nej')
-        .setValue('ja')
-        .setRequired(false);
-
-    modal.addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(udfaldInput),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(agendaTypeInput),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(ansvarligInput),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(opfoelgningsDatumInput),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(assistInput),
-    );
-
-    await inter.showModal(modal);
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Once the bot is ready, register (or update) commands
 // ────────────────────────────────────────────────────────────────────────────
@@ -707,15 +512,6 @@ DiscordHandler.client.once('ready', async () => {
             );
             logger.info('✅ Guild‑scoped commands registered');
         }
-
-        // // fetch all global commands
-        // const existing = await rest.get(Routes.applicationCommands(client.application!.id)) as any[];
-        // for (const cmd of existing) {
-        //     logger.info(`Found global command: ${cmd.name} (${cmd.id})`);
-
-        //     logger.info(`Deleting old global command: ${cmd.name}`);
-        //     await rest.delete(Routes.applicationCommand(client.application!.id, cmd.id));
-        // }
 
     } catch (err) {
         logger.error('❌ Failed to register slash‑commands', err);
@@ -830,9 +626,9 @@ DiscordHandler.client.once('ready', async () => {
             );
 
             logger.info(`Found ${decisionMessages.size} decision messages with meta_data the past ${messageHistoryLimitSec} seconds to check for normalization`);
-
+            const decisionService = new DecisionService();
             for (const msg of Array.from(decisionMessages.values())) {
-                await normalizeMessage(msg);
+                await decisionService.normalize(msg);
             }
         } catch (error) {
             logger.error({ error }, '❌ Failed to set up message handler');
@@ -874,16 +670,14 @@ DiscordHandler.client.once('ready', async () => {
             const decisionMessages = allMessages.filter(m =>
                 m.embeds.length > 0 &&
                 m.embeds[0].fields.some(f => f.name === 'meta_data') &&
-                (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === true || JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === 'true') &&
-                (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time == '' ||
-                    JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time == null ||
-                    JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment_time === undefined)
+                (JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === true || JSON.parse(m.embeds[0].fields.find(f => f.name === 'meta_data')!.value).post_alignment === 'true')
             );
 
             logger.info(`Found ${decisionMessages.size} decision messages to check for alignment`);
 
+            const decisionService = new DecisionService();
             for (const msg of Array.from(decisionMessages.values())) {
-                await alignDecisionWithVisionAndHandbook(msg);
+                await decisionService.align(msg, visionChannelId, handbookChannelId);
             }
         } catch (error) {
             logger.error({ error }, '❌ Failed to set up message handler');
@@ -891,115 +685,6 @@ DiscordHandler.client.once('ready', async () => {
     }, 1000 * postProcessIntervalSec);
 
 });
-
-async function alignDecisionWithVisionAndHandbook(msg: Message): Promise<void> {
-
-    const embed = msg.embeds[0];
-    const metaField = embed.fields.find(f => f.name === 'meta_data')!;
-    let meta: any;
-    try {
-        meta = JSON.parse(metaField.value);
-    } catch (err) {
-        logger.warn({ err, msgId: msg.id, raw: metaField.value }, 'Invalid JSON in meta_data');
-        return;
-    }
-
-    // Check post_alignment flag from meta_data
-    if (meta.post_alignment && (meta.post_alignment_time == '' || meta.post_alignment_time == null || meta.post_alignment_time === undefined)) {
-
-        // Get all embed fields name/value pairs to a JSON array
-        const embedFields: APIEmbedField[] = msg.embeds[0].fields.map((f: APIEmbedField) => ({
-            name: f.name,
-            value: f.value,
-        }));
-
-        // Removed the meta_data field from embedFields. AI should not change this.
-        embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
-
-        // Get vision and handbook messages as archives for OpenAI
-        const kunja = new KunjaHandler();
-        const visionArchive = await kunja.getMessagesAsArchive(visionChannelId!);
-        const handbookArchive = await kunja.getMessagesAsArchive(handbookChannelId!);
-
-        let alignmentData: DecisionAlignmentData = await DiscordHandler.openai.alignDecisionWithOpenAI(embedFields, visionArchive, handbookArchive);
-
-        if (alignmentData.should_raise_objection) {
-            // Try/catch to check for raising an objection.
-            try {
-                logger.info({ alignmentData }, `Auto-aligned decision ${msg.id} → ${JSON.stringify(alignmentData)}`);
-                logger.info(`✅ Applied alignment to decision ${msg.id}`);
-            } catch (err) {
-                logger.error({ err, msgId: msg.id }, '❌ Failed to align decision');
-                // Set meta_data to mark as processed
-                meta.post_alignment_error = true;
-                meta.post_alignment_time = new Date().toISOString();
-                metaField.value = JSON.stringify(meta);
-                await msg.edit({ embeds: [embed] });
-            }
-
-        } else {
-            // Set meta_data to mark as processed
-            meta.post_alignment_time = new Date().toISOString();
-            metaField.value = JSON.stringify(meta);
-            await msg.edit({ embeds: [embed] });
-        }
-
-        return;
-    }
-
-    return;
-}
-
-async function normalizeMessage(msg: Message): Promise<APIEmbedField[] | boolean> {
-
-    const embed = msg.embeds[0];
-    const metaField = embed.fields.find(f => f.name === 'meta_data')!;
-    let meta: any;
-    try {
-        meta = JSON.parse(metaField.value);
-    } catch (err) {
-        logger.warn({ err, msgId: msg.id, raw: metaField.value }, 'Invalid JSON in meta_data');
-        return false;
-    }
-
-    // Check processed flag from meta_data
-    if (meta.post_process && (meta.post_processed_time == '' || meta.post_processed_time == null || meta.post_processed_time === undefined)) {
-
-        // Get all embed fields name/value pairs to a JSON array
-        const embedFields: APIEmbedField[] = msg.embeds[0].fields.map((f: APIEmbedField) => ({
-            name: f.name,
-            value: f.value,
-        }));
-
-        // Removed the meta_data field from embedFields. AI should not change this.
-        embedFields.splice(embedFields.findIndex(f => f.name === 'meta_data'), 1);
-
-        let normalizedEmbedData: NormalizedEmbedData = await DiscordHandler.openai.normalizeEmbedDataWithOpenAI(embedFields);
-
-        // Check JSON diff between normalizedEmbedData and original embedFields
-        logger.info({ normalizedEmbedData, embedFields }, `Checking if normalization is needed for message ${msg.id}`);
-        if (!normalizedEmbedData.post_processed_error && JSON.stringify(normalizedEmbedData) !== JSON.stringify(embedFields)) {
-            // Try/catch to apply normalization.
-            try {
-                logger.info(`Auto-normalized decision ${msg.id} → ${JSON.stringify(normalizedEmbedData)}`);
-                await DiscordHandler.openai.applyNormalization(msg, JSON.stringify(normalizedEmbedData), normalizedEmbedData.post_process_changes, normalizedEmbedData.post_processed_error);
-                logger.info(`✅ Applied normalization to message ${msg.id}`);
-            } catch (err) {
-                logger.error({ err, msgId: msg.id }, '❌ Failed to apply normalization');
-                // Set meta_data to mark as processed
-                meta.post_process = true;
-                meta.post_processed_time = new Date().toISOString();
-                metaField.value = JSON.stringify(meta);
-                await msg.edit({ embeds: [embed] });
-            }
-
-        }
-
-        return embedFields;
-    }
-
-    return false;
-}
 
 setInterval(async () => {
 

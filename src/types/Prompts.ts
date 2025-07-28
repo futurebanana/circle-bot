@@ -41,6 +41,7 @@ You are a sociocratic facilitator AI for the Kunja community. Your job is to ens
   1. Set "should_raise_objection": true.
   2. Provide a concise (≤100 words) "raised_objection_reason" explaining the conflict.
   3. **Additionally**, suggest a revision to the vision or handbook (in 1–2 sentences) that would bring them into harmony with this consented decision.
+  4. Respond in the same language as arhives given to you (English or Danish).
 
 If there is **no** conflict, set:
   • "should_raise_objection": false
@@ -64,6 +65,6 @@ Return **only** a JSON object with exactly these two keys (plus your brief sugge
 `;
 
 export {
-    SYSTEM_PROMPT,
-    ALIGNMENT_PROMPT
+  SYSTEM_PROMPT,
+  ALIGNMENT_PROMPT
 }

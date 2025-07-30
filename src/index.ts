@@ -1,8 +1,5 @@
 import 'dotenv/config';
 import {
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle,
     Client,
     EmbedBuilder,
     GatewayIntentBits,
@@ -15,19 +12,15 @@ import {
     MessageFlags,
 } from 'discord.js';
 import logger from './logger/index';
-import { capitalize } from './helpers/capitalize';
 import {
-    DECISION_EMBED_NEXT_ACTION_DATE,
-    DECISION_EMBED_NEXT_ACTION_DATE_RESPONSIBLE,
     DECISION_EMBED_AUTHOR,
     DECISION_EMBED_ORIGINAL_AGENDA_TYPE,
     DECISION_EMBED_ORIGINAL_TITLE,
     DECISION_EMBED_ORIGINAL_DESCRIPTION,
     DECISION_EMBED_OUTCOME,
-    DECISION_EMBED_PARTICIPANTS,
     DecisionMeta,
 } from './types';
-import { timestampToSnowflake, OpenAIInteractions, createFollowUpMessage, createBacklogMessage } from './helpers';
+import { timestampToSnowflake, OpenAIInteractions, createFollowUpMessage, createBacklogMessage, createDecisionMessage } from './helpers';
 import { CircleHandler, MeetingHandler, AdminHandler, BacklogHandler, HelpHandler, KunjaHandler, DecisionHandler, DiscordHandler } from './handlers';
 import { CircleService, DecisionService } from './services';
 import { commands } from './commands';
@@ -224,42 +217,28 @@ DiscordHandler.client.on('interactionCreate', async (interaction: Interaction) =
     const headline = interaction.fields.getTextInputValue('headline');
     const agenda = interaction.fields.getTextInputValue('agenda');
 
-    // const embed = new EmbedBuilder()
-    //     .setTitle('Nyt punkt til husmøde')
-    //     .setColor(circleCfg.embedColor)
-    //     .setTimestamp(new Date())
-    //     .setAuthor({ name: interaction.member?.user.username ?? 'Anon' })
-    //     .setThumbnail(interaction.user.displayAvatarURL() ?? '')
-    //     .addFields(
-    //         { name: 'Cirkel', value: circleName, inline: true },
-    //         { name: 'Forfatter', value: `<@${interaction.user.id}>`, inline: true },
-    //         { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
-    //         { name: 'Overskrift', value: headline, inline: false },
-    //         { name: 'Beskrivelse', value: agenda, inline: false },
-    //     );
+    try {
+        const { embed: backlogEmbed, components } = createBacklogMessage({
+            circle: circleName,
+            author: interaction.member?.user.username ?? 'Anon',
+            authorMention: `<@${interaction.user.id}>`,
+            agendaType: agendaType,
+            title: headline,
+            description: agenda,
+            color: circleCfg.embedColor || 0x3498db,
+            timestamp: new Date(),
+        });
 
-    // const saveBtn = new ButtonBuilder()
-    //     .setCustomId('saveDecision')
-    //     .setLabel('Gem i beslutninger')
-    //     .setStyle(ButtonStyle.Primary);
+        const msg = await channel.send({ embeds: [backlogEmbed], components });
 
-    // const row = new ActionRowBuilder<ButtonBuilder>().addComponents(saveBtn);
+        await interaction.reply({ content: `Piv! Dit mødepunkt er gemt i <#${circleCfg.backlogChannelId}>`, flags: MessageFlags.Ephemeral });
+        logger.info({ id: msg.id, circle: circleName }, '📌 New backlog item posted');
+    } catch (error) {
+        logger.error({ error }, '❌ Failed to post backlog item');
+        await interaction.reply({ content: '⚠️  Failed to post backlog item.', flags: MessageFlags.Ephemeral });
+        return;
+    }
 
-    const { embed: backlogEmbed, components } = createBacklogMessage({
-        circle: circleName,
-        author: interaction.member?.user.username ?? 'Anon',
-        authorMention: `<@${interaction.user.id}>`,
-        agendaType: agendaType,
-        title: headline,
-        description: agenda,
-        color: circleCfg.embedColor || 0x3498db,
-        timestamp: new Date(),
-    });
-
-    const msg = await channel.send({ embeds: [backlogEmbed], components });
-
-    await interaction.reply({ content: `Piv! Dit mødepunkt er gemt i <#${circleCfg.backlogChannelId}>`, flags: MessageFlags.Ephemeral });
-    logger.info({ id: msg.id, circle: circleName }, '📌 New backlog item posted');
 });
 
 DiscordHandler.client.on('interactionCreate', async (interaction) => {
@@ -285,7 +264,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     const [, circleName, backlogMsgId, rawParticipants] = interaction.customId.split('|');
     const participantIds = rawParticipants.split(',');
 
-    const udfald = interaction.fields.getTextInputValue('udfald');
+    const outcome = interaction.fields.getTextInputValue('udfald');
     const agendaType = interaction.fields.getTextInputValue('agendaType');
     const ansvarlig = interaction.fields.getTextInputValue('ansvarlig');
     const nextDate = interaction.fields.getTextInputValue('opfoelgningsDato');
@@ -322,37 +301,26 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
         backlog_channelId: backlogChannel.id,
     };
 
-    const embed = new EmbedBuilder()
-        .setTitle(capitalize(agendaType))
-        .setColor(circleCfg.embedColor || 0x3498db)
-        .setTimestamp(new Date())
-        .addFields(
-            { name: 'Cirkel', value: circleName, inline: true },
-            { name: DECISION_EMBED_AUTHOR, value: authorMention, inline: true },
-            { name: DECISION_EMBED_ORIGINAL_AGENDA_TYPE, value: agendaType, inline: true },
-            { name: DECISION_EMBED_ORIGINAL_TITLE, value: originalHeadline, inline: false },
-            { name: DECISION_EMBED_ORIGINAL_DESCRIPTION, value: originalDesc, inline: false },
-            { name: DECISION_EMBED_OUTCOME, value: udfald, inline: false },
-            { name: DECISION_EMBED_PARTICIPANTS, value: participantsMentions, inline: false },
-            ...(nextDate
-                ? [{ name: DECISION_EMBED_NEXT_ACTION_DATE, value: nextDate, inline: true }]
-                : []),
-            ...(ansvarlig
-                ? [{ name: DECISION_EMBED_NEXT_ACTION_DATE_RESPONSIBLE, value: ansvarlig, inline: true }]
-                : []),
-            {
-                name: 'meta_data',
-                value: JSON.stringify(meta_data),
-                inline: false
-            },
-        );
-
-    // 5) Send & cleanup
-    const decisionsChannel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
-    await decisionsChannel.send({ embeds: [embed] });
+    const { embed: decisionEmbed, components } = createDecisionMessage({
+        circle: circleName,
+        author: DiscordHandler.client.user?.username ?? 'Kunja Hasselmus',
+        authorMention: authorMention,
+        participantsMentions: participantsMentions,
+        agendaType: agendaType,
+        title: originalHeadline,
+        description: originalDesc,
+        outcome: outcome,
+        color: circleCfg.embedColor || 0x3498db,
+        meta_data: JSON.stringify(meta_data),
+        timestamp: new Date(),
+        nextDate: nextDate,
+        responsible: ansvarlig,
+    });
 
     // Delete original backlog message
     try {
+        const decisionsChannel = await DiscordHandler.client.channels.fetch(decisionChannelId!) as TextChannel;
+        await decisionsChannel.send({ embeds: [decisionEmbed] });
         await backlogChannel.messages.delete(backlogMsgId);
     } catch (err) {
         logger.warn({ err, backlogMsgId }, 'Kunja: Kunne ikke slette backlog-embed');

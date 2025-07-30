@@ -52,3 +52,35 @@ export interface BacklogEmbedData {
     color: number;
     timestamp: Date;
 }
+
+export const DecisionLabels = {
+    timestamp: 'Dato',
+    embedTitle: 'Beslutning',
+    circle: 'Cirkel',
+    author: 'Forfatter',
+    authorMention: 'Forfatter',
+    participantsMentions: 'Deltagere',
+    agendaType: 'Agenda type',
+    headline: 'Original Overskrift',
+    description: 'Original Beskrivelse',
+    outcome: 'Udfald',
+    meta_data: 'meta_data',
+    nextDate: 'Opfølgningsdato',
+    responsible: 'Ansvarlig',
+};
+
+export interface DecisionEmbedData {
+    circle: string;
+    author: string;
+    authorMention: string;
+    participantsMentions: string;
+    agendaType: string;
+    title: string;
+    description: string;
+    outcome: string;
+    color: number;
+    timestamp: Date;
+    nextDate?: string;
+    responsible?: string;
+    meta_data: string;
+}

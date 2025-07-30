@@ -1,5 +1,6 @@
 export { CircleConfig } from './Circles';
 export { MeetingState } from './Meeting';
+export * from './Embeds';
 export {
     SYSTEM_PROMPT,
     ALIGNMENT_PROMPT

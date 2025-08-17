@@ -261,8 +261,19 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     if (!interaction.isModalSubmit() || !interaction.customId.startsWith('meetingOutcomeModal|'))
         return;
 
-    const [, circleName, backlogMsgId, rawParticipants] = interaction.customId.split('|');
-    const participantIds = rawParticipants.split(',');
+    const stateId = interaction.customId.split('|')[1];
+    const state = BacklogHandler.takeOutcomeState(stateId);
+
+    if (!state) {
+        await interaction.reply({
+            content: '⚠️  Formularen udløb eller kunne ikke findes. Prøv igen.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+
+    const { circleName, backlogMsgId, participants } = state;
 
     const outcome = interaction.fields.getTextInputValue('udfald');
     const agendaType = interaction.fields.getTextInputValue('agendaType');
@@ -293,7 +304,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
 
     // 4) Build decision embed
     const authorMention = `<@${interaction.user.id}>`;
-    const participantsMentions = participantIds.map(id => `<@${id}>`).join(', ');
+    const participantsMentions = participants.map(id => `<@${id}>`).join(', ');
 
     let meta_data: DecisionMeta = {
         post_process: assist,

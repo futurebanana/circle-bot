@@ -24,13 +24,37 @@ import { MeetingHandler } from './Meeting';
 import { CircleService } from '../services';
 import { timestampToSnowflake } from '../helpers/snowFlake';
 import logger from '../logger';
+import crypto from 'node:crypto';
 
 /**
- * Class for admnin-related functionalities.
+ * Class for admin-related functionalities.
  * Handles commands like changing meta data and adding embeds.
  */
 
 class BacklogHandler extends DiscordHandler {
+
+    private static outcomeState = new Map<string, {
+        circleName: string;
+        backlogMsgId: string;
+        participants: string[];
+    }>();
+
+    private static makeStateId() {
+        return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    }
+
+    private static saveOutcomeState(stateId: string, data: {
+        circleName: string; backlogMsgId: string; participants: string[];
+    }) {
+        BacklogHandler.outcomeState.set(stateId, data);
+        setTimeout(() => BacklogHandler.outcomeState.delete(stateId), 15 * 60 * 1000).unref?.();
+    }
+
+    public static takeOutcomeState(stateId: string) {
+        const d = BacklogHandler.outcomeState.get(stateId);
+        if (d) BacklogHandler.outcomeState.delete(stateId);
+        return d;
+    }
 
     /**
      *
@@ -205,19 +229,24 @@ class BacklogHandler extends DiscordHandler {
 
         // Meeting is running → show outcome-modal immediately
         const backlogMsgId = inter.message.id;
-        const participantCsv = meeting.participants.join(',');
+
+        const stateId = BacklogHandler.makeStateId();
+        BacklogHandler.saveOutcomeState(stateId, {
+            circleName,
+            backlogMsgId,
+            participants: meeting.participants,
+        });
+
         const modal = new ModalBuilder()
-            .setCustomId(`meetingOutcomeModal|${circleName}|${backlogMsgId}|${participantCsv}`)
+            .setCustomId(`meetingOutcomeModal|${stateId}`)
             .setTitle('Møde – Udfald og Opfølgning');
 
-        // your four fields (udfald, agendaType, ansvarlig, opfoelgningsDato) …
         const udfaldInput = new TextInputBuilder()
             .setCustomId('udfald')
             .setLabel('Udfald')
             .setStyle(TextInputStyle.Paragraph)
             .setRequired(true);
 
-        // get original agendaType and prefill it
         const originalAgendaType = embed.fields.find(f => f.name === DECISION_EMBED_ORIGINAL_AGENDA_TYPE)?.value || 'beslutning';
         const agendaTypeInput = new TextInputBuilder()
             .setCustomId('agendaType')

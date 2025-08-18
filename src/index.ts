@@ -280,6 +280,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     const ansvarlig = interaction.fields.getTextInputValue('ansvarlig');
     const nextDate = interaction.fields.getTextInputValue('opfoelgningsDato');
     const assist = interaction.fields.getTextInputValue('assist').toLowerCase() === 'ja';
+    const alignment = interaction.fields.getTextInputValue('alignment').toLowerCase() === 'ja';
 
     const circleCfg = DiscordHandler.circleConfig[circleName];
 
@@ -309,6 +310,7 @@ DiscordHandler.client.on('interactionCreate', async (interaction) => {
     let meta_data: DecisionMeta = {
         post_process: assist,
         post_processed_error: false,
+        post_alignment: alignment,
         backlog_channelId: backlogChannel.id,
     };
 

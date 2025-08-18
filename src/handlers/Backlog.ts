@@ -266,7 +266,14 @@ class BacklogHandler extends DiscordHandler {
             .setRequired(false);
         const assistInput = new TextInputBuilder()
             .setCustomId('assist')
-            .setLabel('Lad botten hjælpe (ja/nej)')
+            .setLabel('Lad botten hjælpe med dato/stavekontrol (ja/nej)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('ja eller nej—lad stå tomt for nej')
+            .setValue('ja')
+            .setRequired(false);
+        const alignmentInput = new TextInputBuilder()
+            .setCustomId('alignment')
+            .setLabel('Lad botten hjælpe med håndbog/vision forslag (ja/nej)')
             .setStyle(TextInputStyle.Short)
             .setPlaceholder('ja eller nej—lad stå tomt for nej')
             .setValue('ja')
@@ -278,6 +285,7 @@ class BacklogHandler extends DiscordHandler {
             new ActionRowBuilder<TextInputBuilder>().addComponents(ansvarligInput),
             new ActionRowBuilder<TextInputBuilder>().addComponents(opfoelgningsDatumInput),
             new ActionRowBuilder<TextInputBuilder>().addComponents(assistInput),
+            new ActionRowBuilder<TextInputBuilder>().addComponents(alignmentInput),
         );
 
         await inter.showModal(modal);

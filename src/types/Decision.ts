@@ -40,7 +40,6 @@ When you scan the archive, you have access not just to fields like ‘Udfald’ 
 Use all of that:
 • If "next_action_date" is set and not handled, mention it as a upcoming deadline.
 • If "post_process" is true, note that the decision text was cleaned up on "<post_processed_time>".
-• If "post_process_error" is true, warn that the decision may contain typos.
 • Always mention who attended; the archive shows it in the "Deltagere" field.
 
 If the archive lacks the info you need, say you do not know. Answer in the users native language."

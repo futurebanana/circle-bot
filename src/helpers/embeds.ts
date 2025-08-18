@@ -77,11 +77,11 @@ export function createDecisionMessage(data: DecisionEmbedData): BacklogMessage {
         { name: DecisionLabels.circle, value: data.circle, inline: true },
         { name: DecisionLabels.authorMention, value: data.authorMention, inline: true },
         { name: DecisionLabels.participantsMentions, value: data.participantsMentions, inline: true },
+        { name: DecisionLabels.timestamp, value: timestamp.toISOString().slice(0, 10) ?? '', inline: false },
         { name: DecisionLabels.agendaType, value: data.agendaType, inline: true },
         { name: DecisionLabels.headline, value: data.title, inline: true },
         { name: DecisionLabels.description, value: data.description, inline: false },
         { name: DecisionLabels.outcome, value: data.outcome, inline: false },
-
     );
 
     if (data.nextDate && data.nextDate !== null && data.nextDate !== undefined && data.nextDate !== '') {

@@ -52,7 +52,8 @@ class OpenAIInteractions {
 
             logger.info(`Using OpenAI system prompt for embed normalization`);
             const completion = await this.openai.chat.completions.create({
-                model: 'gpt-4o-mini',
+                model: 'gpt-5',
+                reasoning_effort: 'minimal',
                 temperature: 0,
                 messages: [
                     { role: 'system', content: this.systemPrompt },
@@ -87,7 +88,8 @@ class OpenAIInteractions {
 
             logger.info({ alignmentPromt, embedFieldsJSON, archives }, `Using OpenAI system prompt for decision alignment`);
             const completion = await this.openai.chat.completions.create({
-                model: 'gpt-4o-mini',
+                model: 'gpt-5',
+                reasoning_effort: 'high',
                 temperature: 0.5,
                 messages: [
                     { role: 'system', content: alignmentPromt },
